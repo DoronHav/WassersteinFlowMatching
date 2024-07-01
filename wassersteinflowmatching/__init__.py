@@ -1,0 +1,1 @@
+from .WassersteinFlowMatching import WassersteinFlowMatching  # type: ignore  # noqa: F401
