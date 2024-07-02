@@ -287,8 +287,6 @@ class WassersteinFlowMatching:
 
 
 
-        #batch_size = min(self.point_clouds.shape[0], batch_size)
-
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = AttentionNN(config = self.config)
@@ -306,8 +304,7 @@ class WassersteinFlowMatching:
             batch_ind = random.choice(
                 key=subkey,
                 a = self.point_clouds.shape[0],
-                shape=[batch_size],
-                replace=True)
+                shape=[batch_size])
             
 
             point_clouds_batch, weights_batch = self.point_clouds[batch_ind],  self.weights[batch_ind]
