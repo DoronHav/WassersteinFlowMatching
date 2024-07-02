@@ -91,7 +91,6 @@ class WassersteinFlowMatching:
         config = DefaultConfig,
     ):
 
-        print("DEBUG")
 
         self.config = config
         self.point_clouds = point_clouds
@@ -353,11 +352,12 @@ class WassersteinFlowMatching:
             size = self.point_clouds.shape[1]
             noise_weights = None
         else:
-            noise_weights = jnp.ones(num_samples, size)
+            noise_weights = jnp.ones([num_samples, size])
 
         if(self.labels is None):
             generate_labels = None
             if(noise_weights is None):
+                subkey, key = random.split(key)
                 noise_weights = random.choice(subkey, self.weights, [num_samples])
         else:
             if(generate_labels is None):
@@ -384,4 +384,6 @@ class WassersteinFlowMatching:
         for t in tqdm(jnp.linspace(1, 0, timesteps)):
             grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
+        if(generate_labels is None):
+            return noise, noise_weights
         return noise, noise_weights, [self.num_to_label[l] for l in generate_labels]
