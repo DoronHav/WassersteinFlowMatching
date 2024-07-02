@@ -27,7 +27,7 @@ class DefaultConfig:
     :param kernel_init: (Callable) initializer of kernel weights (default nn.initializers.glorot_uniform())
     :param bias_init: ((Callable) initializer of bias weights (default nn.initializers.zeros_init())
     """ 
-    wasserstein_eps: float = 0.01
+    wasserstein_eps: float = 0.001
     wasserstein_lse: bool = True
     mini_batch_ot_mode = True
     minibatch_ot_eps: float = 0.1

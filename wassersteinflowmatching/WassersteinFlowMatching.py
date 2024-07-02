@@ -86,9 +86,12 @@ class WassersteinFlowMatching:
     def __init__(
         self,
         point_clouds,
-        noise_type = 'uniform',
+        labels = None,
+        noise_type = 'normal',
         config = DefaultConfig,
     ):
+
+        print("DEBUG")
 
         self.config = config
         self.point_clouds = point_clouds
@@ -131,6 +134,17 @@ class WassersteinFlowMatching:
             self.minibatch_ot_eps = config.minibatch_ot_eps
             self.minibatch_ot_lse = config.minibatch_ot_lse
 
+        if(labels is not None):
+
+            self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
+            self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
+            self.labels = jnp.array([self.label_to_num[label] for label in labels])
+            self.label_dim = len(np.unique(labels))
+            self.config.label_dim = self.label_dim 
+        else:
+            self.labels = None
+            self.label_dim = -1
+
     def scale_func(self, point_clouds):
         """
         :meta private:
@@ -158,11 +172,19 @@ class WassersteinFlowMatching:
         
         subkey, key = random.split(key)
 
-        params = model.init(rngs={"params": subkey}, 
-                            point_cloud = attn_inputs, 
-                            t = jnp.ones((attn_inputs.shape[0])), 
-                            masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])), 
-                            deterministic = True)['params']
+        if(self.labels is not None):
+            params = model.init(rngs={"params": subkey}, 
+                                point_cloud = attn_inputs, 
+                                t = jnp.ones((attn_inputs.shape[0])), 
+                                masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
+                                labels =  jnp.ones((attn_inputs.shape[0])),
+                                deterministic = True)['params']
+        else:
+            params = model.init(rngs={"params": subkey}, 
+                    point_cloud = attn_inputs, 
+                    t = jnp.ones((attn_inputs.shape[0])), 
+                    masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
+                    deterministic = True)['params']
 
         lr_sched = optax.exponential_decay(
             learning_rate, decay_steps, 0.6, staircase = True,
@@ -197,7 +219,7 @@ class WassersteinFlowMatching:
         return(noise_ind)
 
     @partial(jit, static_argnums=(0,))
-    def train_step(self, state, point_clouds_batch, weights_batch, key=random.key(0)):
+    def train_step(self, state, point_clouds_batch, weights_batch, labels_batch = None, key=random.key(0)):
         """
         :meta private:
         """
@@ -225,14 +247,14 @@ class WassersteinFlowMatching:
 
         
         subkey, key = random.split(key)
-
-        def loss_fn(params):        
+        def loss_fn(params):       
             predicted_flow = state.apply_fn({"params": params},  
-                                                point_cloud = point_cloud_interpolates, 
-                                                t = interpolates_time, 
-                                                masks = noise_weights>0, 
-                                                deterministic = False, 
-                                                dropout_rng = subkey)
+                                            point_cloud = point_cloud_interpolates, 
+                                            t = interpolates_time, 
+                                            masks = noise_weights>0, 
+                                            labels = labels_batch,
+                                            deterministic = False, 
+                                            dropout_rng = subkey)
             error = jnp.square(predicted_flow - optimal_flow) * noise_weights[:, :, None]
             loss = jnp.mean(jnp.sum(error, axis = 1))
             return loss
@@ -266,7 +288,7 @@ class WassersteinFlowMatching:
 
 
 
-        batch_size = min(self.point_clouds.shape[0], batch_size)
+        #batch_size = min(self.point_clouds.shape[0], batch_size)
 
         subkey, key = random.split(key)
 
@@ -286,20 +308,24 @@ class WassersteinFlowMatching:
                 key=subkey,
                 a = self.point_clouds.shape[0],
                 shape=[batch_size],
-                replace=False)
+                replace=True)
             
 
             point_clouds_batch, weights_batch = self.point_clouds[batch_ind],  self.weights[batch_ind]
 
             subkey, key = random.split(key, 2)
-            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, key = subkey)
+            if(self.labels is not None):
+                labels_batch = self.labels[batch_ind]
+            else:
+                labels_batch = None
+            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, key = subkey)
             losses.append(loss) 
 
             if(training_step % verbose == 0):
                 tq.set_description(": {:.3e}".format(loss))
 
     @partial(jit, static_argnums=(0,))
-    def get_flow(self, point_clouds, t):
+    def get_flow(self, point_clouds, weights, t, labels = None):
 
         if(point_clouds.ndim == 2):
             point_clouds = point_clouds[None,:, :]
@@ -307,12 +333,13 @@ class WassersteinFlowMatching:
         flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": self.state.params},
                     point_cloud = point_clouds, 
                     t = t * jnp.ones(point_clouds.shape[0]), 
-                    masks = jnp.ones((point_clouds.shape[0], point_clouds.shape[1])), 
+                    masks = weights>0, 
+                    labels = labels,
                     deterministic = True))
         return(flow)
         
 
-    def generate_samples(self, size = None, num_samples = 10, timesteps = 100, key = random.key(0)): 
+    def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None,key = random.key(0)): 
         """
         Generate samples from the learned flow
 
@@ -321,17 +348,40 @@ class WassersteinFlowMatching:
         :param timesteps: (int) number of timesteps to generate samples (default 100)
 
         :return: generated samples
-        """
+        """ 
         if(size is None):
-            size = int(jnp.mean(jnp.sum(self.weights>0, axis = 1)))
+            size = self.point_clouds.shape[1]
+            noise_weights = None
+        else:
+            noise_weights = jnp.ones(num_samples, size)
 
+        if(self.labels is None):
+            generate_labels = None
+            if(noise_weights is None):
+                noise_weights = random.choice(subkey, self.weights, [num_samples])
+        else:
+            if(generate_labels is None):
+                generate_labels = random.choice(key, self.label_dim, [num_samples], replace = True)
+            elif(isinstance(generate_labels, (str, int))):
+                generate_labels = jnp.array([self.label_to_num[generate_labels]] * num_samples)
+            else:
+                generate_labels = jnp.array([self.label_to_num[label] for label in generate_labels])
+            
+            if(noise_weights is None):
+                noise_weights = []
+                for label in generate_labels:
+                    subkey, key = random.split(key)
+                    noise_weights.append(random.choice(subkey, self.weights[self.labels == label]))
+                noise_weights = jnp.vstack(noise_weights)
         subkey, key = random.split(key)
         noise =  [self.noise_func(size = [num_samples, size, self.space_dim], 
                                 minval = self.min_val, 
                                 maxval = self.max_val, key = subkey)]
+
+
         dt = 1/timesteps
 
         for t in tqdm(jnp.linspace(1, 0, timesteps)):
-            grad_fn = self.get_flow(noise[-1], t)
+            grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
-        return noise
+        return noise, noise_weights, [self.num_to_label[l] for l in generate_labels]
