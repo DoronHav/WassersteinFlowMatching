@@ -335,7 +335,7 @@ class WassersteinFlowMatching:
         return(flow)
         
 
-    def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None,key = random.key(0)): 
+    def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None, init_noise = None, key = random.key(0)): 
         """
         Generate samples from the learned flow
 
@@ -371,9 +371,15 @@ class WassersteinFlowMatching:
                     noise_weights.append(random.choice(subkey, self.weights[self.labels == label]))
                 noise_weights = jnp.vstack(noise_weights)
         subkey, key = random.split(key)
-        noise =  [self.noise_func(size = [num_samples, size, self.space_dim], 
-                                minval = self.min_val, 
-                                maxval = self.max_val, key = subkey)]
+
+        if(init_noise is not None):
+            if(init_noise.ndim == 2):
+                init_noise = init_noise[None, :, :]
+            noise = [init_noise]
+        else:
+            noise =  [self.noise_func(size = [num_samples, size, self.space_dim], 
+                                    minval = self.min_val, 
+                                    maxval = self.max_val, key = subkey)]
 
 
         dt = 1/timesteps
@@ -383,4 +389,4 @@ class WassersteinFlowMatching:
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):
             return noise, noise_weights
-        return noise, noise_weights, [self.num_to_label[l] for l in generate_labels]
+        return noise, noise_weights, [self.num_to_label[l] for l in np.array(generate_labels)]
