@@ -18,7 +18,6 @@ class FeedForward(nn.Module):
     def __call__(self, inputs):
         config = self.config
         mlp_hidden_dim = config.mlp_hidden_dim
-
         x = nn.Dense(features = mlp_hidden_dim)(inputs)
         x = nn.relu(x)
         output = nn.Dense(inputs.shape[-1])(x) + inputs
