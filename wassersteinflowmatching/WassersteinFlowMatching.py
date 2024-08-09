@@ -93,7 +93,10 @@ class WassersteinFlowMatching:
 
 
         self.config = config
-        self.point_clouds = point_clouds
+        self.scaling = self.config.scaling
+        self.factor = self.config.factor
+
+        self.point_clouds = self.scale_func(point_clouds)
 
 
         self.weights = [
@@ -108,30 +111,42 @@ class WassersteinFlowMatching:
         self.space_dim = self.point_clouds.shape[-1]
 
 
-        self.transport_plan_jit = jax.jit(
-            jax.vmap(utils_OT.transport_plan, (0, 0, None, None), 0),
-            static_argnums=[2, 3],
-        )
+        self.monge_map = self.config.monge_map
+
+        if(self.monge_map == 'entropic'):
+            self.transport_plan_jit = jax.jit(
+                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None), 0),
+                static_argnums=[2, 3],
+            )
+        else:
+            self.transport_plan_jit = jax.jit(
+                jax.vmap(utils_OT.transport_plan_exact, (0, 0, None, None), 0),
+                static_argnums=[2, 3],
+            )
 
 
 
-        self.scaling = config.scaling
-        self.factor = config.factor
-        self.point_clouds = self.scale_func(self.point_clouds) * self.factor
-        self.max_val, self.min_val = self.point_clouds.max(), self.point_clouds.min()
+        self.max_val, self.min_val = self.point_clouds[self.weights>0].max(), self.point_clouds[self.weights>0].min()
 
         self.noise_type = noise_type
         self.noise_func = getattr(utils_Noise, self.noise_type)
 
-        self.mini_batch_ot_mode = config.mini_batch_ot_mode
+        self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
 
         if(self.mini_batch_ot_mode):
-            self.ot_mat_jit = jax.jit(
-                jax.vmap(utils_OT.ot_mat, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
-            )
-            self.minibatch_ot_eps = config.minibatch_ot_eps
-            self.minibatch_ot_lse = config.minibatch_ot_lse
+            self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
+            if(self.mini_batch_ot_solver == 'entropic'):
+                self.ot_mat_jit = jax.jit(
+                    jax.vmap(utils_OT.entropic_ot_distance, (0, 0, None, None), 0),
+                    static_argnums=[2, 3],
+                )
+            else:
+                self.ot_mat_jit = jax.jit(
+                    jax.vmap(utils_OT.frechet_distance, (0, 0, None, None), 0),
+                    static_argnums=[2, 3],
+                )
+            self.minibatch_ot_eps = self.config.minibatch_ot_eps
+            self.minibatch_ot_lse = self.config.minibatch_ot_lse
 
         if(labels is not None):
 
@@ -151,11 +166,13 @@ class WassersteinFlowMatching:
 
         if self.scaling == "min_max_total":
             if not hasattr(self, "max_val"):
-                self.max_val_scale = self.point_clouds.max(keepdims=True)
-                self.min_val_scale = self.point_clouds.min(keepdims=True)
+                self.max_val_scale = np.max([pc.max() for pc in point_clouds])
+                self.min_val_scale = np.max([pc.min() for pc in point_clouds])
             else:
                 print("Using Calculated Min Max Scaling Values")
-            return 2 * (point_clouds - self.min_val_scale) / (self.max_val_scale - self.min_val_scale) - 1
+            return [2 * (pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale) - 1 for pc in point_clouds]
+        if self.scaling == "min_max_each":
+            point_clouds = [2 * (pc - pc.min()) / (pc.max() - pc.min()) - 1 for pc in point_clouds]
         return point_clouds
 
 
@@ -202,16 +219,24 @@ class WassersteinFlowMatching:
             
         tri_u_ind = jnp.stack(jnp.triu_indices(point_clouds.shape[0]), axis=1)
 
+
         # compute pairwise ot between point clouds and noise:
+        
+        if(self.mini_batch_ot_solver == 'frechet'):
+            mean_x, cov_x = utils_OT.weighted_mean_and_covariance(point_clouds, point_cloud_weights)
+            mean_y, cov_y = utils_OT.weighted_mean_and_covariance(noise, noise_weights)
+            ot_matrix = lower_tri_to_square(self.ot_mat_jit([mean_x[tri_u_ind[:, 0]], cov_x[tri_u_ind[:, 0]]], 
+                                                            [mean_y[tri_u_ind[:, 1]], cov_y[tri_u_ind[:, 1]]], 
+                                                            self.minibatch_ot_eps, self.minibatch_ot_lse), n = point_clouds.shape[0])
+        else:
+            ot_matrix = lower_tri_to_square(self.ot_mat_jit(
+                        [point_clouds[tri_u_ind[:, 0]], point_cloud_weights[tri_u_ind[:, 0]]],
+                        [noise[tri_u_ind[:, 1]], noise_weights[tri_u_ind[:, 1]]],
+                        self.minibatch_ot_eps,
+                        self.minibatch_ot_lse,
+                    ), n = point_clouds.shape[0])
 
-        ot_matrix = lower_tri_to_square(self.ot_mat_jit(
-                    [point_clouds[tri_u_ind[:, 0]], point_cloud_weights[tri_u_ind[:, 0]]],
-                    [noise[tri_u_ind[:, 1]], noise_weights[tri_u_ind[:, 1]]],
-                    self.minibatch_ot_eps,
-                    self.minibatch_ot_lse,
-                ), n = point_clouds.shape[0])
-
-        pairing_matrix = utils_OT.ot_mat_from_distance(ot_matrix, self.minibatch_ot_eps, self.minibatch_ot_lse)
+        pairing_matrix = utils_OT.ot_mat_from_distance(ot_matrix, 0.01, True)
         
         subkey, key = random.split(key)
         noise_ind = random.categorical(subkey, logits = jnp.log(pairing_matrix + 0.000001))
