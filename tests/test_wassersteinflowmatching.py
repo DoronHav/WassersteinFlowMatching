@@ -9,7 +9,6 @@ def WassersteinFlowMatchingModel():
     point_cloud_sizes = np.random.randint(low = 8, high = 16, size = 64)    
     point_clouds = [np.random.normal(size = [n, 2]) for n in point_cloud_sizes]
 
-    
     Model = WassersteinFlowMatching(point_clouds = point_clouds)
     return(Model)
 

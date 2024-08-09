@@ -12,65 +12,7 @@ import wassersteinflowmatching.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching._utils_Transformer import AttentionNN # type: ignore
 from wassersteinflowmatching.DefaultConfig import DefaultConfig # type: ignore
-
-
-def lower_tri_to_square(v, n):
-    """
-    :meta private:
-    """
-    
-    # # Initialize the square matrix with zeros
-    # mat = jnp.zeros((n, n))
-    
-    # # Fill the lower triangular part of the matrix (including the diagonal) with the vector elements
-    # mat[jnp.tril_indices(n)] = v
-    
-    # # Since it's symmetric, copy the lower triangular part to the upper triangular part
-    # mat = mat + mat.T - jnp.diag(jnp.diag(mat))
-    
-    # Create an empty lower triangular matrix
-
-    idx = np.tril_indices(n)
-    mat = jnp.zeros((n, n), dtype=v.dtype).at[idx].set(v)
-    mat = mat + mat.T - jnp.diag(jnp.diag(mat))
-    return mat
-
-
-
-def pad_pointclouds(point_clouds, weights, max_shape=-1):
-    """
-    :meta private:
-    """
-
-    if max_shape == -1:
-        max_shape = np.max([pc.shape[0] for pc in point_clouds]) + 1
-    else:
-        max_shape = max_shape + 1
-
-
-    weights_pad = np.asarray(
-        [
-            np.concatenate((weight, np.zeros(max_shape - pc.shape[0])), axis=0)
-            for pc, weight in zip(point_clouds, weights)
-        ]
-    )
-    point_clouds_pad = np.asarray(
-        [
-            np.concatenate(
-                [pc, np.zeros([max_shape - pc.shape[0], pc.shape[-1]])], axis=0
-            )
-            for pc in point_clouds
-        ]
-    )
-
-    weights_pad = weights_pad / weights_pad.sum(axis=1, keepdims=True)
-
-    return (
-        point_clouds_pad[:, :-1].astype("float32"),
-        weights_pad[:, :-1].astype("float32"),
-    )
-
-
+from wassersteinflowmatching._utils_Processing import pad_pointclouds # type: ignore
 
 class WassersteinFlowMatching:
     """
@@ -225,11 +167,11 @@ class WassersteinFlowMatching:
         if(self.mini_batch_ot_solver == 'frechet'):
             mean_x, cov_x = utils_OT.weighted_mean_and_covariance(point_clouds, point_cloud_weights)
             mean_y, cov_y = utils_OT.weighted_mean_and_covariance(noise, noise_weights)
-            ot_matrix = lower_tri_to_square(self.ot_mat_jit([mean_x[tri_u_ind[:, 0]], cov_x[tri_u_ind[:, 0]]], 
+            ot_matrix = utils_OT.lower_tri_to_square(self.ot_mat_jit([mean_x[tri_u_ind[:, 0]], cov_x[tri_u_ind[:, 0]]], 
                                                             [mean_y[tri_u_ind[:, 1]], cov_y[tri_u_ind[:, 1]]], 
                                                             self.minibatch_ot_eps, self.minibatch_ot_lse), n = point_clouds.shape[0])
         else:
-            ot_matrix = lower_tri_to_square(self.ot_mat_jit(
+            ot_matrix = utils_OT.lower_tri_to_square(self.ot_mat_jit(
                         [point_clouds[tri_u_ind[:, 0]], point_cloud_weights[tri_u_ind[:, 0]]],
                         [noise[tri_u_ind[:, 1]], noise_weights[tri_u_ind[:, 1]]],
                         self.minibatch_ot_eps,

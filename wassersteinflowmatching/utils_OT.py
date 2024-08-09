@@ -3,6 +3,17 @@ import ott # type: ignore
 from ott.solvers import linear # type: ignore
 import jax # type: ignore
 
+def lower_tri_to_square(v, n):
+    """
+    :meta private:
+    """
+    
+    idx = jnp.tril_indices(n)
+    mat = jnp.zeros((n, n), dtype=v.dtype).at[idx].set(v)
+    mat = mat + mat.T - jnp.diag(jnp.diag(mat))
+    return mat
+
+
 def weighted_mean_and_covariance(pc_x, weights):
     """
     Calculate weighted mean and covariance for a batch of point clouds.
