@@ -2,16 +2,30 @@ import jax.numpy as jnp # type: ignore
 import ott # type: ignore
 from ott.solvers import linear # type: ignore
 import jax # type: ignore
+from jax import random # type: ignore
 
-def lower_tri_to_square(v, n):
+def argmax_row_iter(M):
     """
-    :meta private:
-    """
+    Given a square matrix M, iteratively pick the argmax from each row, 
+    but skip over any elements that have already been picked.
     
-    idx = jnp.tril_indices(n)
-    mat = jnp.zeros((n, n), dtype=v.dtype).at[idx].set(v)
-    mat = mat + mat.T - jnp.diag(jnp.diag(mat))
-    return mat
+    Args:
+        M (jnp.ndarray): A square matrix.
+        
+    Returns:
+        jnp.ndarray: The indices of the selected elements.
+    """
+    N = M.shape[0]
+    selected = jnp.zeros(N, dtype=bool)
+    indices = jnp.zeros(N, dtype=int)
+
+    for i in jnp.arange(N):
+        row = M[i]
+        row_masked = jnp.where(selected, -jnp.inf, row)
+        indices = indices.at[i].set(jnp.argmax(row_masked))
+        selected = selected.at[indices[i]].set(True)
+    
+    return indices
 
 
 def weighted_mean_and_covariance(pc_x, weights):
@@ -39,6 +53,46 @@ def weighted_mean_and_covariance(pc_x, weights):
     
     return weighted_mean, weighted_cov
 
+
+def covariance_barycenter(cov_matrices, weights=None, max_iter=100, tol=1e-6):
+    """
+    Compute the Wasserstein barycenter of N covariance matrices.
+
+    Args:
+        cov_matrices: Array of shape (N, d, d), where N is the number of matrices, and d is the dimension.
+        weights: Optional array of shape (N,) containing the weights of each matrix. If None, uniform weights are used.
+        max_iter: Maximum number of iterations for the fixed-point iteration.
+        tol: Convergence tolerance.
+
+    Returns:
+        The Wasserstein barycenter matrix of shape (d, d).
+    """
+    N, d, _ = cov_matrices.shape
+    if weights is None:
+        weights = jnp.ones(N) / N
+
+    # Initialize the barycenter as the weighted average of the covariances
+    barycenter = jnp.sum(weights[:, None, None] * cov_matrices, axis=0)
+
+    def fixed_point_iteration(barycenter):
+        def update(cov_matrix, barycenter):
+            # Compute matrix square root
+            sqrt_barycenter = matrix_sqrt(barycenter)
+            inv_sqrt_barycenter = jnp.linalg.pinv(sqrt_barycenter)
+            transformed_cov = inv_sqrt_barycenter @ cov_matrix @ inv_sqrt_barycenter
+            return sqrt_barycenter @ matrix_sqrt(transformed_cov) @ sqrt_barycenter
+
+        barycenter_new = jnp.sum(weights[:, None, None] * jax.vmap(update, in_axes=(0, None))(cov_matrices, barycenter), axis=0)
+        return barycenter_new
+
+    for i in range(max_iter):
+        barycenter_new = fixed_point_iteration(barycenter)
+        if jnp.linalg.norm(barycenter_new - barycenter) < tol:
+            break
+        barycenter = barycenter_new
+
+    return barycenter
+
 def matrix_sqrt(A):
     """
     Compute the matrix square root using eigendecomposition.
@@ -56,20 +110,17 @@ def matrix_sqrt(A):
 
 def ot_mat_from_distance(distance_matrix, eps = 0.1, lse_mode = False): 
     ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'mean'),
+        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps),
         lse_mode = lse_mode,
-        min_iterations = 0,
-        max_iterations = 100)
+        min_iterations = 0)
     return(ot_solve.matrix)
 
 def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False): 
-
-    
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     ot_solve = linear.solve(
-        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'mean'),
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
         a = w_x,
         b = w_y,
         lse_mode = lse_mode,
@@ -107,7 +158,7 @@ def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
     # Compute the Fréchet distance
     return(mean_diff_squared + trace_sum - 2 * trace_term)
 
-def transport_plan_entropic(pc_x, pc_y, eps = 0.001, lse_mode = True): 
+def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -115,15 +166,15 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.001, lse_mode = True):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
         a = w_x,
         b = w_y,
-        lse_mode = lse_mode,
         min_iterations = 0,
-        max_iterations = 100)
+        max_iterations = 100,
+        lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
     return(delta)
 
-def transport_plan_exact(pc_x, pc_y, eps = 0.001, lse_mode = True):
+def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -131,10 +182,48 @@ def transport_plan_exact(pc_x, pc_y, eps = 0.001, lse_mode = True):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
         a = w_x,
         b = w_y,
-        lse_mode = lse_mode,
         min_iterations = 0,
-        max_iterations = 100)
+        max_iterations = 100,
+        lse_mode = lse_mode)
     
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
+    delta = pc_y[map_ind]-pc_x
+    return(delta)
+
+def transport_plan_exact_rand(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    ot_solve = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        a = w_x,
+        b = w_y,
+        min_iterations = 0,
+        max_iterations = 500,
+        lse_mode = lse_mode)
+    
+
+    pairing_matrix = ot_solve.matrix
+    pairing_matrix = pairing_matrix/pairing_matrix.sum(axis = 1)
+    
+    subkey, key = random.split(key)
+    map_ind = random.categorical(subkey, logits = jnp.log(pairing_matrix + 0.000001))
+    delta = pc_y[map_ind]-pc_x
+    return(delta)
+
+
+def transport_plan_exact_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    ot_solve = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        a = w_x,
+        b = w_y,
+        min_iterations = 0,
+        max_iterations = 500,
+        lse_mode = lse_mode)
+    
+    map_ind = argmax_row_iter(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
     return(delta)
