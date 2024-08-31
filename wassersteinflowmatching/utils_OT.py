@@ -125,7 +125,7 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
         b = w_y,
         lse_mode = lse_mode,
         min_iterations = 0,
-        max_iterations = 100)
+        max_iterations = 500)
     return(ot_solve.reg_ot_cost)
 
 def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
@@ -167,7 +167,7 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, key = rand
         a = w_x,
         b = w_y,
         min_iterations = 0,
-        max_iterations = 100,
+        max_iterations = 500,
         lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
@@ -183,7 +183,7 @@ def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.
         a = w_x,
         b = w_y,
         min_iterations = 0,
-        max_iterations = 100,
+        max_iterations = 500,
         lse_mode = lse_mode)
     
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)

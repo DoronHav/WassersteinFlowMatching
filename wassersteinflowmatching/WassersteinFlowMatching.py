@@ -434,7 +434,7 @@ class WassersteinFlowMatching:
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)):
+        for t in tqdm(jnp.linspace(1, 0, timesteps)[::-1]):
             grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):
