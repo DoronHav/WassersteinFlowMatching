@@ -71,7 +71,7 @@ def uniform(size, noise_config, key = random.key(0)):
                                     minval = minval, maxval = maxval)
     return(noise_samples)
 
-def normal(size, noise_config,key = random.key(0)):
+def normal(size, noise_config, key = random.key(0)):
     minval = noise_config.minval
     maxval = noise_config.maxval
     subkey, key = random.split(key)
@@ -79,6 +79,12 @@ def normal(size, noise_config,key = random.key(0)):
     noise_samples = minval + (maxval - minval) * (noise_samples + 3) / 6
     return(noise_samples)
 
+
+# def normal(size, minval, maxval, key = random.key(0)):
+#     subkey, key = random.split(key)
+#     noise_samples = random.truncated_normal(subkey, shape = size, upper = 3, lower = -3)
+#     noise_samples = minval + (maxval - minval) * (noise_samples + 3) / 6
+#     return(noise_samples)
 
 def meta_normal(size, noise_config, key):
     """ Sample K covariance matrices from Wishart distribution and n points from each.

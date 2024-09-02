@@ -18,6 +18,7 @@ class FeedForward(nn.Module):
     def __call__(self, inputs):
         config = self.config
         mlp_hidden_dim = config.mlp_hidden_dim
+
         x = nn.Dense(features = mlp_hidden_dim)(inputs)
         x = nn.relu(x)
         output = nn.Dense(inputs.shape[-1])(x) + inputs
@@ -104,17 +105,14 @@ class AttentionNN(nn.Module):
             x = jnp.concatenate([x, 
                                  jnp.tile(l_emb[:, None, :], [1, point_cloud.shape[1], 1])], axis = -1)
 
+        x = nn.Dense(features = embedding_dim)(x)
+        
         for _ in range(num_layers):
             x = EncoderBlock(config)(inputs = x, masks = masks, deterministic = deterministic, dropout_rng = dropout_rng)   
-
-        x = Layer(config = config)(x)
-        x = Layer(config = config)(x)
 
         x = nn.Dense(space_dim)(x)
 
         return x
-
-
 
 
 

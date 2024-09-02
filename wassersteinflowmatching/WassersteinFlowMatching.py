@@ -56,24 +56,20 @@ class WassersteinFlowMatching:
         self.space_dim = self.point_clouds.shape[-1]
         self.monge_map = self.config.monge_map
         self.wasserstein_exact_mode = self.config.wasserstein_exact_mode
+
         if(self.monge_map == 'entropic'):
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None, None), 0),
+                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
             )
         elif(self.wasserstein_exact_mode == 'row_iter'):
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_exact_rowiter, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3],
-            )
-        elif(self.wasserstein_exact_mode == 'sample'):
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_exact_rand, (0, 0, None, None, None), 0),
+                jax.vmap(utils_OT.transport_plan_exact_rowiter, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
             )
         else:
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_exact, (0, 0, None, None, None), 0),
+                jax.vmap(utils_OT.transport_plan_exact, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
             )
 
@@ -95,6 +91,10 @@ class WassersteinFlowMatching:
 
 
         else:
+
+            self.min_val = self.point_clouds[self.weights > 0].min()
+            self.max_val = self.point_clouds[self.weights > 0].max()
+
             self.noise_config.maxval = self.point_clouds[self.weights > 0].max()
             self.noise_config.minval = self.point_clouds[self.weights > 0].min()
 
@@ -150,15 +150,17 @@ class WassersteinFlowMatching:
         """
         :meta private:
         """
-        if self.scaling == "min_max_total":
-            self.max_abs = np.max([np.max(np.abs(pc)) for pc in point_clouds])
-            return [pc/self.max_abs for pc in point_clouds]
-        if self.scaling == "min_max_each":
-            point_clouds = [pc/np.max(np.abs(pc)) for pc in point_clouds]
-            return point_clouds
-        return point_clouds
 
-    def create_train_state(self, model, peak_lr, end_lr, num_warmup, num_train, key = random.key(0)):
+        if self.scaling == "min_max_total":
+            self.max_val_scale = np.max([np.max(pc) for pc in point_clouds])
+            self.min_val_scale = np.min([np.min(pc) for pc in point_clouds])
+            return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
+        if self.scaling == "min_max_each":
+            point_clouds = [self.factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
+        return point_clouds
+    
+
+    def create_train_state(self, model, learning_rate, decay_steps = 1000, key = random.key(0)):
         """
         :meta private:
         """
@@ -168,6 +170,12 @@ class WassersteinFlowMatching:
                                        noise_config = self.noise_config,
                                        key = subkey)
         
+        # attn_inputs =  self.noise_func(size = [10, self.point_clouds[0].shape[0], self.space_dim], 
+        #                                minval = self.min_val, 
+        #                                maxval = self.max_val, 
+        #                                key = subkey)
+        
+
         if(len(attn_inputs) == 2):
             attn_inputs = attn_inputs[0]
         subkey, key = random.split(key)
@@ -186,19 +194,11 @@ class WassersteinFlowMatching:
                     masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
                     deterministic = True)['params']
 
-        lr_sched = optax.warmup_cosine_decay_schedule(
-            init_value=peak_lr/10,
-            peak_value=peak_lr,
-            warmup_steps=num_warmup,
-            decay_steps=num_train - num_warmup,
-            end_value=end_lr
+        lr_sched = optax.exponential_decay(
+            learning_rate, decay_steps, 0.97, staircase = True,
         )
 
-        tx = optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.adamw(lr_sched, weight_decay=0.0001)
-        )
-                
+        tx = optax.adam(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
@@ -250,6 +250,8 @@ class WassersteinFlowMatching:
             else:
                 noise_weights = weights_batch
 
+
+        
         minibatch_key, key = random.split(key)
         if(self.mini_batch_ot_mode):
             noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key = minibatch_key)
@@ -258,12 +260,10 @@ class WassersteinFlowMatching:
 
         interpolates_time = random.uniform(subkey_t, (point_clouds_batch.shape[0],), minval=0.0, maxval=1.0)
         
-        transport_plan_key, key = random.split(key)
         optimal_flow = jnp.nan_to_num(self.transport_plan_jit([noise_samples, noise_weights], 
                                                               [point_clouds_batch, weights_batch], 
                                                               self.config.wasserstein_eps, 
-                                                              self.config.wasserstein_lse, 
-                                                              transport_plan_key), neginf=0)
+                                                              self.config.wasserstein_lse), neginf=0)
         
         point_cloud_interpolates = noise_samples + (1-interpolates_time[:, None, None]) * optimal_flow
 
@@ -290,8 +290,8 @@ class WassersteinFlowMatching:
         training_steps=32000,
         batch_size=16,
         verbose=8,
-        peak_lr = 5e-4,
-        end_lr = 1e-5,
+        init_lr=0.0001,
+        decay_steps=1000,
         key=random.key(0),
     ):
         """
@@ -313,12 +313,10 @@ class WassersteinFlowMatching:
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = AttentionNN(config = self.config)
-        self.state = self.create_train_state(self.FlowMatchingModel, 
-                                            peak_lr = peak_lr, 
-                                            end_lr = end_lr, 
-                                            num_warmup = training_steps // 20, 
-                                            num_train = training_steps,
-                                            key = subkey)
+        self.state = self.create_train_state(model = self.FlowMatchingModel,
+                                             learning_rate=init_lr, 
+                                             decay_steps = decay_steps, 
+                                             key = subkey)
 
 
         tq = trange(training_steps, leave=True, desc="")
@@ -340,6 +338,7 @@ class WassersteinFlowMatching:
 
             if(self.labels is not None):
                 labels_batch = self.labels[batch_ind]
+                
             else:
                 labels_batch = None
 
@@ -424,6 +423,12 @@ class WassersteinFlowMatching:
                 init_noise = init_noise[None, :, :]
             noise = [init_noise]
         else:
+
+            # noise = self.noise_func(size =[num_samples, size, self.space_dim], 
+            #             minval = self.min_val, 
+            #             maxval = self.max_val, key = subkey)
+
+
             noise = self.noise_func(size = [num_samples, size, self.space_dim], 
                                       noise_config = self.noise_config,
                                       key = subkey)
@@ -434,7 +439,7 @@ class WassersteinFlowMatching:
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)[::-1]):
+        for t in tqdm(jnp.linspace(1, 0, timesteps)):
             grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):

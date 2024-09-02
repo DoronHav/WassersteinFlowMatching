@@ -158,7 +158,7 @@ def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
     # Compute the Fréchet distance
     return(mean_diff_squared + trace_sum - 2 * trace_term)
 
-def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
+def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -167,14 +167,14 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, key = rand
         a = w_x,
         b = w_y,
         min_iterations = 0,
-        max_iterations = 500,
+        max_iterations = 100,
         lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
     return(delta)
 
-def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
+def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -190,29 +190,9 @@ def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.
     delta = pc_y[map_ind]-pc_x
     return(delta)
 
-def transport_plan_exact_rand(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
-
-    ot_solve = linear.solve(
-        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
-        a = w_x,
-        b = w_y,
-        min_iterations = 0,
-        max_iterations = 500,
-        lse_mode = lse_mode)
-    
-
-    pairing_matrix = ot_solve.matrix
-    pairing_matrix = pairing_matrix/pairing_matrix.sum(axis = 1)
-    
-    subkey, key = random.split(key)
-    map_ind = random.categorical(subkey, logits = jnp.log(pairing_matrix + 0.000001))
-    delta = pc_y[map_ind]-pc_x
-    return(delta)
 
 
-def transport_plan_exact_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, key = random.key(0)): 
+def transport_plan_exact_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
