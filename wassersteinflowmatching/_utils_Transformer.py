@@ -24,6 +24,23 @@ class FeedForward(nn.Module):
         output = nn.Dense(inputs.shape[-1])(x) + inputs
         return output
 
+
+class Layer(nn.Module):
+    """Transformer MLP / feed-forward block.
+
+    Attributes:
+    config: DefaultConfig dataclass containing hyperparameters.
+    out_dim: optionally specify out dimension.
+    """
+    config: DefaultConfig
+
+    @nn.compact
+    def __call__(self, inputs):
+        config = self.config
+        mlp_hidden_dim = config.mlp_hidden_dim
+        x = nn.Dense(features = mlp_hidden_dim)(inputs)
+        output = nn.relu(x)
+        return output
     
 class EncoderBlock(nn.Module):
     """Transformer encoder layer.
@@ -71,24 +88,31 @@ class AttentionNN(nn.Module):
         if masks is None:
             masks = jnp.ones((point_cloud.shape[0],point_cloud.shape[1]))
 
-
         x_emb = nn.Dense(features = embedding_dim)(point_cloud)
-        t_emb = nn.Dense(features = embedding_dim)(t[:, None, None])
+            
+        freqs = jnp.arange(embedding_dim//2) 
+        t_freq = freqs[None, :] * t[:, None]
+        t_four = jnp.concatenate([jnp.cos(t_freq), jnp.sin(t_freq)], axis = -1)
 
-        x = x_emb + t_emb
+        t_emb = nn.Dense(features = embedding_dim)(t_four)
+
+        x = jnp.concatenate([x_emb, 
+                        jnp.tile(t_emb[:, None, :], [1, point_cloud.shape[1], 1])], axis = -1)
+
 
         if(labels is not None):
-            l_emb = nn.Dense(features = embedding_dim)(jax.nn.one_hot(labels, config.label_dim)[:, None, :])
-            x = x + l_emb
+            l_emb = nn.Dense(features = embedding_dim)(jax.nn.one_hot(labels, config.label_dim))
+            x = jnp.concatenate([x, 
+                                 jnp.tile(l_emb[:, None, :], [1, point_cloud.shape[1], 1])], axis = -1)
 
+        x = nn.Dense(features = embedding_dim)(x)
+        
         for _ in range(num_layers):
-            x = EncoderBlock(config)(inputs = x, masks = masks, deterministic = deterministic, dropout_rng = dropout_rng)
+            x = EncoderBlock(config)(inputs = x, masks = masks, deterministic = deterministic, dropout_rng = dropout_rng)   
 
         x = nn.Dense(space_dim)(x)
 
         return x
-
-
 
 
 

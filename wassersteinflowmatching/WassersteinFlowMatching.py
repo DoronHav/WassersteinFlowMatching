@@ -1,4 +1,6 @@
 from functools import partial
+import types
+import time
 
 import jax # type: ignore
 import jax.numpy as jnp # type: ignore
@@ -7,70 +9,13 @@ import optax # type: ignore
 from jax import jit, random# type: ignore
 from tqdm import trange, tqdm # type: ignore
 from flax.training import train_state # type: ignore
+import pickle # type: ignore
 
 import wassersteinflowmatching.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching._utils_Transformer import AttentionNN # type: ignore
 from wassersteinflowmatching.DefaultConfig import DefaultConfig # type: ignore
-
-
-def lower_tri_to_square(v, n):
-    """
-    :meta private:
-    """
-    
-    # # Initialize the square matrix with zeros
-    # mat = jnp.zeros((n, n))
-    
-    # # Fill the lower triangular part of the matrix (including the diagonal) with the vector elements
-    # mat[jnp.tril_indices(n)] = v
-    
-    # # Since it's symmetric, copy the lower triangular part to the upper triangular part
-    # mat = mat + mat.T - jnp.diag(jnp.diag(mat))
-    
-    # Create an empty lower triangular matrix
-
-    idx = np.tril_indices(n)
-    mat = jnp.zeros((n, n), dtype=v.dtype).at[idx].set(v)
-    mat = mat + mat.T - jnp.diag(jnp.diag(mat))
-    return mat
-
-
-
-def pad_pointclouds(point_clouds, weights, max_shape=-1):
-    """
-    :meta private:
-    """
-
-    if max_shape == -1:
-        max_shape = np.max([pc.shape[0] for pc in point_clouds]) + 1
-    else:
-        max_shape = max_shape + 1
-
-
-    weights_pad = np.asarray(
-        [
-            np.concatenate((weight, np.zeros(max_shape - pc.shape[0])), axis=0)
-            for pc, weight in zip(point_clouds, weights)
-        ]
-    )
-    point_clouds_pad = np.asarray(
-        [
-            np.concatenate(
-                [pc, np.zeros([max_shape - pc.shape[0], pc.shape[-1]])], axis=0
-            )
-            for pc in point_clouds
-        ]
-    )
-
-    weights_pad = weights_pad / weights_pad.sum(axis=1, keepdims=True)
-
-    return (
-        point_clouds_pad[:, :-1].astype("float32"),
-        weights_pad[:, :-1].astype("float32"),
-    )
-
-
+from wassersteinflowmatching._utils_Processing import pad_pointclouds # type: ignore
 
 class WassersteinFlowMatching:
     """
@@ -87,62 +32,116 @@ class WassersteinFlowMatching:
         self,
         point_clouds,
         labels = None,
-        noise_type = 'normal',
+        noise_point_clouds = None,
+        matched_noise = False,
         config = DefaultConfig,
     ):
 
 
         self.config = config
-        self.point_clouds = point_clouds
+        self.scaling = self.config.scaling
+        self.factor = self.config.factor
+
+        self.point_clouds = self.scale_func(point_clouds)
 
 
         self.weights = [
             np.ones(pc.shape[0]) / pc.shape[0] for pc in self.point_clouds
         ]
 
-
         self.point_clouds, self.weights = pad_pointclouds(
             self.point_clouds, self.weights
         )
 
         self.space_dim = self.point_clouds.shape[-1]
+        self.monge_map = self.config.monge_map
 
-
-        self.transport_plan_jit = jax.jit(
-            jax.vmap(utils_OT.transport_plan, (0, 0, None, None), 0),
-            static_argnums=[2, 3],
-        )
-
-
-
-        self.scaling = config.scaling
-        self.factor = config.factor
-        self.point_clouds = self.scale_func(self.point_clouds) * self.factor
-        self.max_val, self.min_val = self.point_clouds.max(), self.point_clouds.min()
-
-        self.noise_type = noise_type
-        self.noise_func = getattr(utils_Noise, self.noise_type)
-
-        self.mini_batch_ot_mode = config.mini_batch_ot_mode
-
-        if(self.mini_batch_ot_mode):
-            self.ot_mat_jit = jax.jit(
-                jax.vmap(utils_OT.ot_mat, (0, 0, None, None), 0),
+        if(self.monge_map == 'entropic'):
+            self.transport_plan_jit = jax.jit(
+                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
             )
-            self.minibatch_ot_eps = config.minibatch_ot_eps
-            self.minibatch_ot_lse = config.minibatch_ot_lse
+        elif(self.monge_map == 'row_iter'):
+            self.transport_plan_jit = jax.jit(
+                jax.vmap(utils_OT.transport_plan_exact_rowiter, (0, 0, None, None), 0),
+                static_argnums=[2, 3],
+            )
+        else:
+            self.transport_plan_jit = jax.jit(
+                jax.vmap(utils_OT.transport_plan_exact, (0, 0, None, None), 0),
+                static_argnums=[2, 3],
+            )
+
+        self.noise_config = types.SimpleNamespace()
+        if(noise_point_clouds is not None):
+            self.noise_point_clouds = self.scale_func(noise_point_clouds)
+            self.noise_weights = [
+                np.ones(pc.shape[0]) / pc.shape[0] for pc in self.noise_point_clouds
+            ]
+            self.noise_point_clouds, self.noise_weights = pad_pointclouds(
+                self.noise_point_clouds, self.noise_weights
+            )
+
+            self.noise_config.noise_point_clouds = self.noise_point_clouds
+            self.noise_config.noise_weights = self.noise_weights
+            self.matched_noise = matched_noise
+            self.noise_func = utils_Noise.random_pointclouds
+            self.config.mini_batch_ot_mode = not self.matched_noise
+
+        else:
+
+            self.min_val = self.point_clouds[self.weights > 0].min()
+            self.max_val = self.point_clouds[self.weights > 0].max()
+
+            self.noise_config.maxval = self.point_clouds[self.weights > 0].max()
+            self.noise_config.minval = self.point_clouds[self.weights > 0].min()
+
+            self.noise_type = self.config.noise_type
+            self.noise_func = getattr(utils_Noise, self.noise_type)
+            self.matched_noise = False 
+
+            if(self.noise_type == 'meta_normal'):
+                self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
+                self.covariance_barycenter = utils_OT.covariance_barycenter(self.point_clouds_cov, max_iter = 100, tol = 1e-6)
+                self.noise_config.covariance_barycenter_chol = jnp.linalg.cholesky(self.covariance_barycenter)
+                self.noise_config.noise_df_scale = self.config.noise_df_scale
+            if(self.noise_type == 'chol_normal'):
+                self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
+                self.cov_chol = jax.vmap(jnp.linalg.cholesky)(self.point_clouds_cov)
+                self.noise_config.cov_chol_mean = jnp.mean(self.cov_chol, axis = 0)
+                self.noise_config.cov_chol_std = jnp.std(self.cov_chol, axis = 0)
+                self.noise_config.noise_df_scale = self.config.noise_df_scale
+ 
+
+        self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
+
 
         if(labels is not None):
-
             self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
             self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
             self.labels = jnp.array([self.label_to_num[label] for label in labels])
             self.label_dim = len(np.unique(labels))
             self.config.label_dim = self.label_dim 
+            self.mini_batch_ot_mode = False
         else:
             self.labels = None
             self.label_dim = -1
+
+
+        if(self.mini_batch_ot_mode):
+            self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
+            if(self.mini_batch_ot_solver == 'entropic'):
+                self.ot_mat_jit = jax.jit(
+                    jax.vmap(utils_OT.entropic_ot_distance, (0, 0, None, None), 0),
+                    static_argnums=[2, 3],
+                )
+            else:
+                self.ot_mat_jit = jax.jit(
+                    jax.vmap(utils_OT.frechet_distance, (0, 0, None, None), 0),
+                    static_argnums=[2, 3],
+                )
+            self.minibatch_ot_eps = self.config.minibatch_ot_eps
+            self.minibatch_ot_lse = self.config.minibatch_ot_lse
 
     def scale_func(self, point_clouds):
         """
@@ -150,25 +149,27 @@ class WassersteinFlowMatching:
         """
 
         if self.scaling == "min_max_total":
-            if not hasattr(self, "max_val"):
-                self.max_val_scale = self.point_clouds.max(keepdims=True)
-                self.min_val_scale = self.point_clouds.min(keepdims=True)
-            else:
-                print("Using Calculated Min Max Scaling Values")
-            return 2 * (point_clouds - self.min_val_scale) / (self.max_val_scale - self.min_val_scale) - 1
+            self.max_val_scale = np.max([np.max(pc) for pc in point_clouds])
+            self.min_val_scale = np.min([np.min(pc) for pc in point_clouds])
+            return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
+        if self.scaling == "min_max_each":
+            point_clouds = [self.factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
         return point_clouds
+    
 
-
-    def create_train_state(self, model, learning_rate, decay_steps = 10000, key = random.key(0)):
+    def create_train_state(self, model, learning_rate, decay_steps = 1000, key = random.key(0)):
         """
         :meta private:
         """
 
         subkey, key = random.split(key)
         attn_inputs =  self.noise_func(size = [10, self.point_clouds[0].shape[0], self.space_dim], 
-                                       minval = self.min_val, 
-                                       maxval = self.max_val, key = subkey)
-        
+                                       noise_config = self.noise_config,
+                                       key = subkey)
+    
+
+        if(len(attn_inputs) == 2):
+            attn_inputs = attn_inputs[0]
         subkey, key = random.split(key)
 
         if(self.labels is not None):
@@ -186,8 +187,9 @@ class WassersteinFlowMatching:
                     deterministic = True)['params']
 
         lr_sched = optax.exponential_decay(
-            learning_rate, decay_steps, 0.6, staircase = True,
+            learning_rate, decay_steps, 0.97, staircase = True,
         )
+
         tx = optax.adam(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
@@ -200,38 +202,49 @@ class WassersteinFlowMatching:
         :meta private:
         """
             
-        tri_u_ind = jnp.stack(jnp.triu_indices(point_clouds.shape[0]), axis=1)
+        matrix_ind = jnp.array(jnp.meshgrid(jnp.arange(point_clouds.shape[0]), jnp.arange(noise.shape[0]))).T.reshape(-1, 2)
+
 
         # compute pairwise ot between point clouds and noise:
+        
+        if(self.mini_batch_ot_solver == 'frechet'):
+            mean_x, cov_x = utils_OT.weighted_mean_and_covariance(point_clouds, point_cloud_weights)
+            mean_y, cov_y = utils_OT.weighted_mean_and_covariance(noise, noise_weights)
+            ot_matrix = self.ot_mat_jit([mean_x[matrix_ind[:, 0]], cov_x[matrix_ind[:, 0]]], 
+                                        [mean_y[matrix_ind[:, 1]], cov_y[matrix_ind[:, 1]]], 
+                                        self.minibatch_ot_eps, self.minibatch_ot_lse).reshape(point_clouds.shape[0], noise.shape[0])
+        else:
+            ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
+                                        [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]],
+                                        self.minibatch_ot_eps,
+                                        self.minibatch_ot_lse).reshape(point_clouds.shape[0], noise.shape[0])
 
-        ot_matrix = lower_tri_to_square(self.ot_mat_jit(
-                    [point_clouds[tri_u_ind[:, 0]], point_cloud_weights[tri_u_ind[:, 0]]],
-                    [noise[tri_u_ind[:, 1]], noise_weights[tri_u_ind[:, 1]]],
-                    self.minibatch_ot_eps,
-                    self.minibatch_ot_lse,
-                ), n = point_clouds.shape[0])
-
-        pairing_matrix = utils_OT.ot_mat_from_distance(ot_matrix, self.minibatch_ot_eps, self.minibatch_ot_lse)
+        pairing_matrix = utils_OT.ot_mat_from_distance(ot_matrix, 0.0001, True)
+        pairing_matrix = pairing_matrix/pairing_matrix.sum(axis = 1)
         
         subkey, key = random.split(key)
         noise_ind = random.categorical(subkey, logits = jnp.log(pairing_matrix + 0.000001))
         return(noise_ind)
 
     @partial(jit, static_argnums=(0,))
-    def train_step(self, state, point_clouds_batch, weights_batch, labels_batch = None, key=random.key(0)):
+    def train_step(self, state, point_clouds_batch, weights_batch, labels_batch = None, noise_samples = None, noise_weights = None, key=random.key(0)):
         """
         :meta private:
         """
         subkey_t, subkey_noise, key = random.split(key, 3)
         
-        noise_samples =  self.noise_func(size = point_clouds_batch.shape, 
-                                minval = self.min_val, 
-                                maxval = self.max_val, key = subkey_noise)
-        noise_weights = weights_batch
-
+        if(noise_samples is None):
+            noise_samples = self.noise_func(size = point_clouds_batch.shape, 
+                                            noise_config = self.noise_config,
+                                            key = subkey_noise)
+            if(len(noise_samples) == 2):
+                noise_samples, noise_weights = noise_samples
+            else:
+                noise_weights = weights_batch
+        
+        minibatch_key, key = random.split(key)
         if(self.mini_batch_ot_mode):
-            subkey_resample, key = random.split(key)
-            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key = subkey_resample)
+            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key = minibatch_key)
             noise_samples = noise_samples[noise_ind]
             noise_weights = noise_weights[noise_ind]
 
@@ -268,7 +281,7 @@ class WassersteinFlowMatching:
         batch_size=16,
         verbose=8,
         init_lr=0.0001,
-        decay_num=4,
+        decay_steps=1000,
         key=random.key(0),
     ):
         """
@@ -290,14 +303,14 @@ class WassersteinFlowMatching:
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = AttentionNN(config = self.config)
-        self.state = self.create_train_state(self.FlowMatchingModel, 
+        self.state = self.create_train_state(model = self.FlowMatchingModel,
                                              learning_rate=init_lr, 
-                                             decay_steps = int(training_steps / decay_num), 
+                                             decay_steps = decay_steps, 
                                              key = subkey)
 
 
         tq = trange(training_steps, leave=True, desc="")
-        losses = []
+        self.losses = []
         for training_step in tq:
 
             subkey, key = random.split(key, 2)
@@ -306,27 +319,50 @@ class WassersteinFlowMatching:
                 a = self.point_clouds.shape[0],
                 shape=[batch_size])
             
-
             point_clouds_batch, weights_batch = self.point_clouds[batch_ind],  self.weights[batch_ind]
+            
+            if(self.matched_noise):
+                noise_samples, noise_weights = self.noise_point_clouds[batch_ind], self.noise_weights[batch_ind]
+            else:
+                noise_samples, noise_weights = None, None
 
-            subkey, key = random.split(key, 2)
             if(self.labels is not None):
                 labels_batch = self.labels[batch_ind]
+                
             else:
                 labels_batch = None
-            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, key = subkey)
-            losses.append(loss) 
+
+            subkey, key = random.split(key, 2)
+
+            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, noise_samples, noise_weights, key = subkey)
+
+            self.params = self.state.params
+            self.losses.append(loss) 
 
             if(training_step % verbose == 0):
                 tq.set_description(": {:.3e}".format(loss))
 
+    def load_train_model(self, path):
+        """
+        Load a pre-trained train state into the model
+
+
+        :param path to params
+
+        :return: nothing
+        """ 
+
+        self.FlowMatchingModel = AttentionNN(config = self.config)
+        with open(path, 'rb') as f:
+            self.params = pickle.load(f)
+
     @partial(jit, static_argnums=(0,))
-    def get_flow(self, point_clouds, weights, t, labels = None):
+    def get_flow(self, params, point_clouds, weights, t, labels = None):
 
         if(point_clouds.ndim == 2):
             point_clouds = point_clouds[None,:, :]
 
-        flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": self.state.params},
+        flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": params},
                     point_cloud = point_clouds, 
                     t = t * jnp.ones(point_clouds.shape[0]), 
                     masks = weights>0, 
@@ -377,15 +413,24 @@ class WassersteinFlowMatching:
                 init_noise = init_noise[None, :, :]
             noise = [init_noise]
         else:
-            noise =  [self.noise_func(size = [num_samples, size, self.space_dim], 
-                                    minval = self.min_val, 
-                                    maxval = self.max_val, key = subkey)]
+
+            # noise = self.noise_func(size =[num_samples, size, self.space_dim], 
+            #             minval = self.min_val, 
+            #             maxval = self.max_val, key = subkey)
+
+
+            noise = self.noise_func(size = [num_samples, size, self.space_dim], 
+                                      noise_config = self.noise_config,
+                                      key = subkey)
+            if(len(noise) == 2):
+                noise, noise_weights = noise
+            noise =  [noise]
 
 
         dt = 1/timesteps
 
         for t in tqdm(jnp.linspace(1, 0, timesteps)):
-            grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
+            grad_fn = self.get_flow(self.params, noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):
             return noise, noise_weights
