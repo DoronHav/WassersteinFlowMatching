@@ -30,7 +30,6 @@ class DefaultConfig:
     monge_map: str = 'entropic'
     wasserstein_eps: float = 0.001
     wasserstein_lse: bool = True
-    wasserstein_exact_mode: str = 'argmax'
     mini_batch_ot_mode: bool = True
     mini_batch_ot_solver: str = 'frechet'
     minibatch_ot_eps: float = 0.1

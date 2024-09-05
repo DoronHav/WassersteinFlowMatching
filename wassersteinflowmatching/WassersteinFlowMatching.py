@@ -55,14 +55,13 @@ class WassersteinFlowMatching:
 
         self.space_dim = self.point_clouds.shape[-1]
         self.monge_map = self.config.monge_map
-        self.wasserstein_exact_mode = self.config.wasserstein_exact_mode
 
         if(self.monge_map == 'entropic'):
             self.transport_plan_jit = jax.jit(
                 jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
             )
-        elif(self.wasserstein_exact_mode == 'row_iter'):
+        elif(self.monge_map == 'row_iter'):
             self.transport_plan_jit = jax.jit(
                 jax.vmap(utils_OT.transport_plan_exact_rowiter, (0, 0, None, None), 0),
                 static_argnums=[2, 3],
@@ -88,7 +87,6 @@ class WassersteinFlowMatching:
             self.matched_noise = matched_noise
             self.noise_func = utils_Noise.random_pointclouds
             self.config.mini_batch_ot_mode = not self.matched_noise
-
 
         else:
 
@@ -119,7 +117,6 @@ class WassersteinFlowMatching:
 
 
         if(labels is not None):
-
             self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
             self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
             self.labels = jnp.array([self.label_to_num[label] for label in labels])
@@ -169,12 +166,7 @@ class WassersteinFlowMatching:
         attn_inputs =  self.noise_func(size = [10, self.point_clouds[0].shape[0], self.space_dim], 
                                        noise_config = self.noise_config,
                                        key = subkey)
-        
-        # attn_inputs =  self.noise_func(size = [10, self.point_clouds[0].shape[0], self.space_dim], 
-        #                                minval = self.min_val, 
-        #                                maxval = self.max_val, 
-        #                                key = subkey)
-        
+    
 
         if(len(attn_inputs) == 2):
             attn_inputs = attn_inputs[0]
@@ -249,8 +241,6 @@ class WassersteinFlowMatching:
                 noise_samples, noise_weights = noise_samples
             else:
                 noise_weights = weights_batch
-
-
         
         minibatch_key, key = random.split(key)
         if(self.mini_batch_ot_mode):
@@ -367,12 +357,12 @@ class WassersteinFlowMatching:
             self.params = pickle.load(f)
 
     @partial(jit, static_argnums=(0,))
-    def get_flow(self, point_clouds, weights, t, labels = None):
+    def get_flow(self, params, point_clouds, weights, t, labels = None):
 
         if(point_clouds.ndim == 2):
             point_clouds = point_clouds[None,:, :]
 
-        flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": self.params},
+        flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": params},
                     point_cloud = point_clouds, 
                     t = t * jnp.ones(point_clouds.shape[0]), 
                     masks = weights>0, 
@@ -440,7 +430,7 @@ class WassersteinFlowMatching:
         dt = 1/timesteps
 
         for t in tqdm(jnp.linspace(1, 0, timesteps)):
-            grad_fn = self.get_flow(noise[-1], noise_weights, t, generate_labels)
+            grad_fn = self.get_flow(self.params, noise[-1], noise_weights, t, generate_labels)
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):
             return noise, noise_weights

@@ -167,7 +167,7 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False):
         a = w_x,
         b = w_y,
         min_iterations = 0,
-        max_iterations = 100,
+        max_iterations = 500,
         lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
@@ -189,7 +189,6 @@ def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False):
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
     delta = pc_y[map_ind]-pc_x
     return(delta)
-
 
 
 def transport_plan_exact_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False): 
