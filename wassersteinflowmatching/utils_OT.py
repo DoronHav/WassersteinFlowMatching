@@ -2,31 +2,66 @@ import jax.numpy as jnp # type: ignore
 import ott # type: ignore
 from ott.solvers import linear # type: ignore
 import jax # type: ignore
+from jax import lax # type: ignore
 from jax import random # type: ignore
+
+# def argmax_row_iter(M):
+#     """
+#     Given a square matrix M, iteratively pick the argmax from each row, 
+#     but skip over any elements that have already been picked.
+#     dd
+#     Args:
+#         M (jnp.ndarray): A square matrix.
+        
+#     Returns:
+#         jnp.ndarray: The indices of the selected elements.
+#     """
+#     N = M.shape[0]
+#     selected = jnp.zeros(N, dtype=bool)
+#     indices = jnp.zeros(N, dtype=int)
+
+#     for i in jnp.arange(N):
+#         row = M[i]
+#         row_masked = jnp.where(selected,  -1, row)
+#         indices = indices.at[i].set(jnp.argmax(row_masked))
+#         selected = selected.at[indices[i]].set(True)
+    
+#     return indices
+
 
 def argmax_row_iter(M):
     """
-    Given a square matrix M, iteratively pick the argmax from each row, 
-    but skip over any elements that have already been picked.
-    
+    Convert a soft assignment matrix M to a hard assignment vector
+    by iteratively finding the largest value in M and making assignments.
+
     Args:
-        M (jnp.ndarray): A square matrix.
+        M (jnp.ndarray): A square soft assignment matrix.
         
     Returns:
-        jnp.ndarray: The indices of the selected elements.
+        jnp.ndarray: A vector of length N where the i-th element is the assignment index.
     """
     N = M.shape[0]
-    selected = jnp.zeros(N, dtype=bool)
-    indices = jnp.zeros(N, dtype=int)
+    assignment = jnp.full(N, -1, dtype=jnp.int32)
 
-    for i in jnp.arange(N):
-        row = M[i]
-        row_masked = jnp.where(selected, -jnp.inf, row)
-        indices = indices.at[i].set(jnp.argmax(row_masked))
-        selected = selected.at[indices[i]].set(True)
-    
-    return indices
+    def body_fun(_, val):
+        M, assignment = val
+        
+        # Find the global maximum
+        flat_idx = jnp.argmax(M)
+        i, j = jnp.unravel_index(flat_idx, M.shape)
+        
+        # Update assignment
+        assignment = assignment.at[i].set(j)
+        
+        # Set the corresponding row and column to -inf
+        M = M.at[i, :].set(-1)
+        M = M.at[:, j].set(-1)
+        
+        return M, assignment
 
+    _, assignment = lax.fori_loop(0, N, body_fun, (M, assignment))
+
+    return assignment
 
 def weighted_mean_and_covariance(pc_x, weights):
     """
@@ -108,13 +143,6 @@ def matrix_sqrt(A):
     return eigenvectors @ jnp.diag(jnp.sqrt(eigenvalues)) @ eigenvectors.T
 
 
-def ot_mat_from_distance(distance_matrix, eps = 0.1, lse_mode = False): 
-    ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps),
-        lse_mode = lse_mode,
-        min_iterations = 0)
-    return(ot_solve.matrix)
-
 def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
@@ -124,9 +152,17 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
         a = w_x,
         b = w_y,
         lse_mode = lse_mode,
-        min_iterations = 0,
-        max_iterations = 500)
+        min_iterations = 200,
+        max_iterations = 200)
     return(ot_solve.reg_ot_cost)
+
+
+def euclidean_distance(pc_x, pc_y, eps = 0.1, lse_mode = False): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    dist = jnp.mean(jnp.sum((pc_x - pc_y)**2, axis = 1))
+    return(dist)
 
 def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
     """
@@ -158,51 +194,98 @@ def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
     # Compute the Fréchet distance
     return(mean_diff_squared + trace_sum - 2 * trace_term)
 
+def ot_mat_from_distance(distance_matrix, eps = 0.1, lse_mode = False): 
+    ot_solve = linear.solve(
+        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps),
+        lse_mode = lse_mode,
+        min_iterations = 200,
+        max_iterations = 200)
+    map_ind = argmax_row_iter(ot_solve.matrix)
+    return(map_ind)
+
+def sample_ot_matrix(pc_x, pc_y, mat, key):
+    """
+    Sample a transport matrix from an optimal transport plan.
+    
+    Args:
+    pc_x: Source point cloud.
+    pc_y: Target point cloud.
+    mat: Optimal transport matrix.
+    key: PRNG key.
+    
+
+    """
+    sample_key, key = random.split(key)
+    map_ind = random.categorical(sample_key, logits = jnp.log(mat), axis = -1)
+    sampled_flow = pc_y[map_ind] - pc_x
+
+    return sampled_flow
+
 def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     ot_solve = linear.solve(
-        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 0,
-        max_iterations = 500,
+        min_iterations = 200,
+        max_iterations = 200,
         lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
     return(delta)
 
-def transport_plan_exact(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     ot_solve = linear.solve(
-        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 0,
-        max_iterations = 500,
+        min_iterations = 200,
+        max_iterations = 200,
         lse_mode = lse_mode)
     
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
     delta = pc_y[map_ind]-pc_x
     return(delta)
 
-
-def transport_plan_exact_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     ot_solve = linear.solve(
-        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 0,
-        max_iterations = 500,
+        min_iterations = 200,
+        max_iterations = 200,
         lse_mode = lse_mode)
     
     map_ind = argmax_row_iter(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
+    return(delta)
+
+def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    ot_solve = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
+        a = w_x,
+        b = w_y,
+        min_iterations = 200,
+        max_iterations = 200,
+        lse_mode = lse_mode)
+    
+    return(ot_solve.matrix)
+
+def transport_plan_euclidean(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    delta = pc_y - pc_x
     return(delta)

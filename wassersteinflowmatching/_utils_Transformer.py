@@ -24,7 +24,6 @@ class FeedForward(nn.Module):
         output = nn.Dense(inputs.shape[-1])(x) + inputs
         return output
 
-
 class Layer(nn.Module):
     """Transformer MLP / feed-forward block.
 
@@ -110,7 +109,9 @@ class AttentionNN(nn.Module):
         for _ in range(num_layers):
             x = EncoderBlock(config)(inputs = x, masks = masks, deterministic = deterministic, dropout_rng = dropout_rng)   
 
-        x = nn.Dense(space_dim)(x)
+        x = nn.Dense(features=space_dim, 
+                     kernel_init=nn.initializers.zeros, 
+                     bias_init=nn.initializers.zeros)(x)
 
         return x
 
