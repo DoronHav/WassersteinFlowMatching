@@ -221,7 +221,7 @@ def sample_ot_matrix(pc_x, pc_y, mat, key):
 
     return sampled_flow
 
-def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -229,15 +229,15 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 200,
-        max_iterations = 200,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration,
         lse_mode = lse_mode)
     
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
     return(delta)
 
-def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -245,15 +245,15 @@ def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 200,
-        max_iterations = 200,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration,
         lse_mode = lse_mode)
     
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
     delta = pc_y[map_ind]-pc_x
     return(delta)
 
-def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -261,15 +261,15 @@ def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 200,
-        max_iterations = 200,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration,
         lse_mode = lse_mode)
     
     map_ind = argmax_row_iter(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
     return(delta)
 
-def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -277,13 +277,13 @@ def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False):
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = 200,
-        max_iterations = 200,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration,
         lse_mode = lse_mode)
     
     return(ot_solve.matrix)
 
-def transport_plan_euclidean(pc_x, pc_y, eps = 0.01, lse_mode = False): 
+def transport_plan_euclidean(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 

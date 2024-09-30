@@ -58,37 +58,38 @@ class WassersteinFlowMatching:
 
         self.space_dim = self.point_clouds.shape[-1]
         self.monge_map = self.config.monge_map
+        self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
 
         if(self.monge_map == 'entropic'):
-            print("Using entropic Monge map")
+            print(f"Using entropic map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
+                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None, None), 0),
+                static_argnums=[2, 3, 4],
             )
         elif(self.monge_map == 'row_iter'):
-            print("Using row_iter Monge map")
+            print(f"Using row_iter map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_rowiter, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
+                jax.vmap(utils_OT.transport_plan_rowiter, (0, 0, None, None, None), 0),
+                static_argnums=[2, 3, 4],
             )
         elif(self.monge_map == 'sample'):
-            print("Using sampled Monge map")
+            print(f"Using sampled map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_sample, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
+                jax.vmap(utils_OT.transport_plan_sample, (0, 0, None, None, None), 0),
+                static_argnums=[2, 3, 4],
             )
             self.sample_map_jit = jax.jit(jax.vmap(utils_OT.sample_ot_matrix, (0, 0, 0, 0), 0))
         elif(self.monge_map == 'euclidean'):
             print("Using euclidean Monge map")
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_euclidean, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
+                jax.vmap(utils_OT.transport_plan_euclidean, (0, 0, None, None, None), 0),
+                static_argnums=[2, 3, 4],
             )
         else:
-            print("Using argmax Monge map")
+            print(f"Using argmax map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
             self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_argmax, (0, 0, None, None), 0),
-                static_argnums=[2, 3],
+                jax.vmap(utils_OT.transport_plan_argmax, (0, 0, None, None, None), 0),
+                static_argnums=[2, 3, 4],
             )
 
         self.noise_config = types.SimpleNamespace()
@@ -170,7 +171,7 @@ class WassersteinFlowMatching:
             self.minibatch_ot_eps = self.config.minibatch_ot_eps
             self.minibatch_ot_lse = self.config.minibatch_ot_lse
 
-            self.FlowMatchingModel = AttentionNN(config = self.config)
+        self.FlowMatchingModel = AttentionNN(config = self.config)
 
     def scale_func(self, point_clouds):
         """
@@ -285,7 +286,8 @@ class WassersteinFlowMatching:
         optimal_flow = jnp.nan_to_num(self.transport_plan_jit([noise_samples, noise_weights], 
                                                               [point_clouds_batch, weights_batch], 
                                                               self.config.wasserstein_eps, 
-                                                              self.config.wasserstein_lse), neginf=0)
+                                                              self.config.wasserstein_lse,
+                                                              self.num_sinkhorn_iters), neginf=0)
 
         if(self.monge_map == 'sample'):
             optimal_flow = self.sample_map_jit(noise_samples, point_clouds_batch, optimal_flow, random.split(key, point_clouds_batch.shape[0]))
