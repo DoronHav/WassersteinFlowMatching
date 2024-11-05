@@ -5,30 +5,6 @@ import jax # type: ignore
 from jax import lax # type: ignore
 from jax import random # type: ignore
 
-# def argmax_row_iter(M):
-#     """
-#     Given a square matrix M, iteratively pick the argmax from each row, 
-#     but skip over any elements that have already been picked.
-#     dd
-#     Args:
-#         M (jnp.ndarray): A square matrix.
-        
-#     Returns:
-#         jnp.ndarray: The indices of the selected elements.
-#     """
-#     N = M.shape[0]
-#     selected = jnp.zeros(N, dtype=bool)
-#     indices = jnp.zeros(N, dtype=int)
-
-#     for i in jnp.arange(N):
-#         row = M[i]
-#         row_masked = jnp.where(selected,  -1, row)
-#         indices = indices.at[i].set(jnp.argmax(row_masked))
-#         selected = selected.at[indices[i]].set(True)
-    
-#     return indices
-
-
 def argmax_row_iter(M):
     """
     Convert a soft assignment matrix M to a hard assignment vector
@@ -157,14 +133,14 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
     return(ot_solve.reg_ot_cost)
 
 
-def euclidean_distance(pc_x, pc_y, eps = 0.1, lse_mode = False): 
+def euclidean_distance(pc_x, pc_y): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     dist = jnp.mean(jnp.sum((pc_x - pc_y)**2, axis = 1))
     return(dist)
 
-def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
+def frechet_distance(Nx, Ny):
     """
     Compute the Fréchet distance between two Gaussian distributions.
     
@@ -194,9 +170,27 @@ def frechet_distance(Nx, Ny, eps = 0.1, lse_mode = False):
     # Compute the Fréchet distance
     return(mean_diff_squared + trace_sum - 2 * trace_term)
 
-def ot_mat_from_distance(distance_matrix, eps = 0.1, lse_mode = False): 
+def chamfer_distance(pc_x, pc_y):
+    
+    pc_x, w_x = pc_x
+    pc_y, w_y = pc_y
+
+    w_x_bool = w_x > 0
+    w_y_bool = w_y > 0
+
+    pairwise_dist =  jnp.sum(jnp.square(pc_x[:, None, :] - pc_y[None, :, :]), axis=-1)
+    # set pairwise_dist where w_x is zero to infinity
+
+    pairwise_dist += -jnp.log(w_x_bool[:, None] + 1e-6) - jnp.log(w_y_bool[None, :] + 1e-6)
+    # use weighted average:
+
+    chamfer_dist = jnp.sum(pairwise_dist.min(axis = 0) * w_y) + jnp.sum(pairwise_dist.min(axis = 1) * w_x)
+    return chamfer_dist
+
+
+def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
     ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps),
+        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
         lse_mode = lse_mode,
         min_iterations = 200,
         max_iterations = 200)
@@ -235,7 +229,7 @@ def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iterat
     
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
-    return(delta)
+    return(delta, ot_solve)
 
 def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
@@ -251,7 +245,7 @@ def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteratio
     
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
     delta = pc_y[map_ind]-pc_x
-    return(delta)
+    return(delta, ot_solve)
 
 def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
@@ -267,7 +261,7 @@ def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iterati
     
     map_ind = argmax_row_iter(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
-    return(delta)
+    return(delta, ot_solve)
 
 def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
@@ -281,11 +275,11 @@ def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteratio
         max_iterations = num_iteration,
         lse_mode = lse_mode)
     
-    return(ot_solve.matrix)
+    return(ot_solve.matrix, ot_solve)
 
-def transport_plan_euclidean(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_euclidean(pc_x, pc_y): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
     delta = pc_y - pc_x
-    return(delta)
+    return(delta, 0)

@@ -1,7 +1,6 @@
-from functools import partial
-import types
-import time
-
+from functools import partial # type: ignore
+import types # type: ignore
+ 
 import jax # type: ignore
 import jax.numpy as jnp # type: ignore
 import numpy as np  # type: ignore
@@ -11,13 +10,16 @@ from tqdm import trange, tqdm # type: ignore
 from flax.training import train_state # type: ignore
 import pickle # type: ignore
 
-import wassersteinflowmatching.utils_OT as utils_OT # type: ignore
-import wassersteinflowmatching.utils_Noise as utils_Noise # type: ignore
-from wassersteinflowmatching._utils_Transformer import AttentionNN # type: ignore
-from wassersteinflowmatching.DefaultConfig import DefaultConfig # type: ignore
-from wassersteinflowmatching._utils_Processing import pad_pointclouds # type: ignore
+import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
+import wassersteinflowmatching.riemannian_wasserstein.utils_Sphere as utils_Sphere # type: ignore
+import wassersteinflowmatching.riemannian_wasserstein.utils_Hyperbole as utils_Hyperbole # type: ignore
+import wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
+from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
+from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
+from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
-class WassersteinFlowMatching:
+
+class RiemannianWassersteinFlowMatching:
     """
     Initializes Wormhole model and processes input point clouds
 
@@ -40,8 +42,10 @@ class WassersteinFlowMatching:
 
         
     
-        
+        print("Initializing WassersteinFlowMatching")
+
         self.config = config
+        self.geom = self.config.geom
         self.scaling = self.config.scaling
         self.factor = self.config.factor
 
@@ -60,37 +64,35 @@ class WassersteinFlowMatching:
         self.monge_map = self.config.monge_map
         self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
 
-        if(self.monge_map == 'entropic'):
-            print(f"Using entropic map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_entropic, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3, 4],
-            )
-        elif(self.monge_map == 'row_iter'):
-            print(f"Using row_iter map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_rowiter, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3, 4],
-            )
-        elif(self.monge_map == 'sample'):
-            print(f"Using sampled map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_sample, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3, 4],
-            )
-            self.sample_map_jit = jax.jit(jax.vmap(utils_OT.sample_ot_matrix, (0, 0, 0, 0), 0))
-        elif(self.monge_map == 'euclidean'):
-            print("Using euclidean Monge map")
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_euclidean, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3, 4],
-            )
+
+        print(f"Using {self.monge_map} map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
+        self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan, 
+                                            eps = self.config.wasserstein_eps, 
+                                            lse_mode = self.config.wasserstein_lse, 
+                                            num_iteration = self.config.num_sinkhorn_iters),
+                                            (0, 0), 0)
+        
+        if(self.monge_map == 'row_iter'):
+            self.sample_map_jit = jax.vmap(utils_OT.argmax_row_iter, (0, 0), 0)
         else:
-            print(f"Using argmax map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-            self.transport_plan_jit = jax.jit(
-                jax.vmap(utils_OT.transport_plan_argmax, (0, 0, None, None, None), 0),
-                static_argnums=[2, 3, 4],
-            )
+            self.sample_map_jit = jax.vmap(utils_OT.sample_ot_matrix, (0, 0), 0)
+        
+
+        
+        if(self.geom == 'sphere'):
+            print("Using Sphere Geometry")
+            self.interpolant_vmap = jax.vmap(jax.vmap(utils_Sphere.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+            self.interpolant_velocity_vmap = jax.vmap(jax.vmap(utils_Sphere.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+            self.exponential_map_vmap = jax.vmap(jax.vmap(utils_Sphere.exponential_map, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, None), out_axes=0)
+        else:
+            print("Using Hyperbolic Geometry")
+            self.interpolant_vmap = jax.vmap(jax.vmap(utils_Hyperbole.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+            self.interpolant_velocity_vmap = jax.vmap(jax.vmap(utils_Hyperbole.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+            self.exponential_map_vmap = jax.vmap(jax.vmap(utils_Hyperbole.exponential_map, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, None), out_axes=0)
+            
+        
+        self.loss_func_vmap = jax.vmap(jax.vmap(utils_Sphere.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+
 
         self.noise_config = types.SimpleNamespace()
         if(noise_point_clouds is not None):
@@ -110,11 +112,6 @@ class WassersteinFlowMatching:
 
         else:
 
-            self.min_val = self.point_clouds[self.weights > 0].min()
-            self.max_val = self.point_clouds[self.weights > 0].max()
-
-            self.noise_config.maxval = self.point_clouds[self.weights > 0].max()
-            self.noise_config.minval = self.point_clouds[self.weights > 0].min()
 
             self.noise_type = self.config.noise_type
             self.noise_func = getattr(utils_Noise, self.noise_type)
@@ -152,45 +149,54 @@ class WassersteinFlowMatching:
             self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
             if(self.mini_batch_ot_solver == 'entropic'):
                 print("Entropic Mini-Batch")
-                self.ot_mat_jit = jax.jit(
-                    jax.vmap(utils_OT.entropic_ot_distance, (0, 0, None, None), 0),
-                    static_argnums=[2, 3],
-                )
+                self.ot_mat_jit = jax.vmap(partial(utils_OT.entropic_ot_distance, 
+                                                   eps = self.config.minibatch_ot_eps,
+                                                   lse_mode = self.config.minibatch_ot_lse), (0, 0), 0)
+            elif(self.mini_batch_ot_solver == 'chamfer'):
+                print("Chamfer Mini-Batch")
+                self.ot_mat_jit = jax.vmap(partial(utils_OT.chamfer_distance, 
+                                            geom = self.geom), (0, 0), 0)
             elif(self.mini_batch_ot_solver == 'euclidean'):
                 print("Euclidean Mini-Batch")
-                self.ot_mat_jit = jax.jit(
-                    jax.vmap(utils_OT.euclidean_distance, (0, 0, None, None), 0),
-                    static_argnums=[2, 3],
-                )
+                self.ot_mat_jit = jax.vmap(utils_OT.euclidean_distance, (0, 0), 0)
             else:
                 print("Frechet Mini-Batch")
-                self.ot_mat_jit = jax.jit(
-                    jax.vmap(utils_OT.frechet_distance, (0, 0, None, None), 0),
-                    static_argnums=[2, 3],
-                )
-            self.minibatch_ot_eps = self.config.minibatch_ot_eps
-            self.minibatch_ot_lse = self.config.minibatch_ot_lse
-
+                self.ot_mat_jit = jax.vmap(utils_OT.frechet_distance, (0, 0), 0)
+        
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
     def scale_func(self, point_clouds):
         """
         :meta private:
         """
-
-        if self.scaling == "min_max_total":
-            if(hasattr(self, 'max_val_scale')):
-                return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
-            else:
-                self.max_val_scale = np.max([np.max(pc) for pc in point_clouds])
-                self.min_val_scale = np.min([np.min(pc) for pc in point_clouds])
-                return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
-        if self.scaling == "min_max_each":
-            point_clouds = [self.factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
+        if(self.geom == 'sphere'):
+            point_clouds = [pc/np.linalg.norm(pc, axis = 1, keepdims = True) for pc in point_clouds]
+        else:
+            
+            normalized_clouds = []
+    
+            for pc in point_clouds:
+                branch_sign = np.sign(pc[:, 0])
+        
+                hyperbolic_norm = np.sqrt(np.abs(pc[:, 0]**2 - pc[:, 1]**2))
+                
+                # Scale points to satisfy x² - y² = 1
+                # First normalize by hyperbolic norm, then multiply x component by branch sign
+                normalized_pc = pc / hyperbolic_norm[:, np.newaxis]
+                normalized_pc[:, 0] = np.where(
+                    hyperbolic_norm > 0,
+                    branch_sign * np.sqrt(1 + normalized_pc[:, 1]**2),
+                    normalized_pc[:, 0]
+                )
+                
+                normalized_clouds.append(normalized_pc)
+            
+            point_clouds = normalized_clouds
+            
         return point_clouds
     
 
-    def create_train_state(self, model, learning_rate, decay_steps, key = random.key(0)):
+    def create_train_state(self, model, peak_lr, end_lr, training_steps, warmup_steps, key = random.key(0)):
         """
         :meta private:
         """
@@ -219,18 +225,22 @@ class WassersteinFlowMatching:
                     masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
                     deterministic = True)['params']
 
-    
 
-        lr_sched = optax.exponential_decay(
-            learning_rate, decay_steps, 0.97, staircase = False,
+
+        lr_sched = optax.warmup_cosine_decay_schedule(
+            init_value=peak_lr/100,
+            peak_value=peak_lr,
+            warmup_steps=warmup_steps,
+            decay_steps=training_steps - warmup_steps,
+            end_value=end_lr
         )
-
+        
         tx = optax.adam(lr_sched)  #
+
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
-    @partial(jit, static_argnums=(0,))
     def minibatch_ot(self, point_clouds, point_cloud_weights, noise, noise_weights, key = random.key(0)):
 
         """
@@ -246,71 +256,80 @@ class WassersteinFlowMatching:
             mean_x, cov_x = utils_OT.weighted_mean_and_covariance(point_clouds, point_cloud_weights)
             mean_y, cov_y = utils_OT.weighted_mean_and_covariance(noise, noise_weights)
             ot_matrix = self.ot_mat_jit([mean_x[matrix_ind[:, 0]], cov_x[matrix_ind[:, 0]]], 
-                                        [mean_y[matrix_ind[:, 1]], cov_y[matrix_ind[:, 1]]], 
-                                        self.minibatch_ot_eps, self.minibatch_ot_lse).reshape(point_clouds.shape[0], noise.shape[0])
+                                        [mean_y[matrix_ind[:, 1]], cov_y[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
         else:
             ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
-                                        [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]],
-                                        self.minibatch_ot_eps,
-                                        self.minibatch_ot_lse).reshape(point_clouds.shape[0], noise.shape[0])
+                                        [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
 
         noise_ind = utils_OT.ot_mat_from_distance(ot_matrix, 0.002, True)
-        return(noise_ind)
+        return(noise_ind, ot_matrix)
 
-    
+
+
+
     @partial(jit, static_argnums=(0,))
-    def train_step(self, state, point_clouds_batch, weights_batch, labels_batch = None, noise_samples = None, noise_weights = None, key=random.key(0)):
+    def train_step(self, state, point_clouds_batch, weights_batch, labels_batch=None, noise_samples=None, noise_weights=None, key=random.key(0)):
         """
-        :meta private:
+        JIT-compiled training step with internal function timing.
         """
+
+        # Time random.split operation
         subkey_t, subkey_noise, key = random.split(key, 3)
-        
-        if(noise_samples is None):
-            noise_samples = self.noise_func(size = point_clouds_batch.shape, 
-                                            noise_config = self.noise_config,
-                                            key = subkey_noise)
-            if(len(noise_samples) == 2):
+
+        if noise_samples is None:
+            # Time noise_func
+            noise_samples = self.noise_func(size=point_clouds_batch.shape, 
+                                            noise_config=self.noise_config,
+                                            key=subkey_noise)
+            if len(noise_samples) == 2:
                 noise_samples, noise_weights = noise_samples
             else:
                 noise_weights = weights_batch
-        
-        
-        if(self.mini_batch_ot_mode):
+
+        if self.mini_batch_ot_mode:
+            # Time minibatch_ot operation
             minibatch_key, key = random.split(key)
-            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key = minibatch_key)
+            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key=minibatch_key)[0]
             noise_samples = noise_samples[noise_ind]
-            noise_weights = noise_weights[noise_ind]
+            if(self.monge_map == 'entropic'):
+                noise_weights = noise_weights[noise_ind]
 
+        # Time random.uniform for interpolates_time
         interpolates_time = random.uniform(subkey_t, (point_clouds_batch.shape[0],), minval=0.0, maxval=1.0)
-        
-        optimal_flow = jnp.nan_to_num(self.transport_plan_jit([noise_samples, noise_weights], 
-                                                              [point_clouds_batch, weights_batch], 
-                                                              self.config.wasserstein_eps, 
-                                                              self.config.wasserstein_lse,
-                                                              self.num_sinkhorn_iters), neginf=0)
 
-        if(self.monge_map == 'sample'):
-            optimal_flow = self.sample_map_jit(noise_samples, point_clouds_batch, optimal_flow, random.split(key, point_clouds_batch.shape[0]))
-        
-        point_cloud_interpolates = noise_samples + (1-interpolates_time[:, None, None]) * optimal_flow
+        # Time transport_plan_jit operation
+        ot_marix = self.transport_plan_jit([noise_samples, noise_weights], 
+                                           [point_clouds_batch, weights_batch])[0]
 
-        
+        ot_assignment = self.sample_map_jit(ot_marix, random.split(key, point_clouds_batch.shape[0]))
+        assigned_points = jnp.take_along_axis(point_clouds_batch, ot_assignment[:, :, None], axis=1)
+
+        point_cloud_interpolates = self.interpolant_vmap(noise_samples, assigned_points, 1-interpolates_time)
+        point_cloud_velocity = self.interpolant_velocity_vmap(noise_samples, assigned_points, 1-interpolates_time)
+        # Time interpolation computation
+
         subkey, key = random.split(key)
-        def loss_fn(params):       
+
+        def loss_fn(params):
+            # Time loss function evaluation
             predicted_flow = state.apply_fn({"params": params},  
                                             point_cloud = point_cloud_interpolates, 
                                             t = interpolates_time, 
-                                            masks = noise_weights>0, 
+                                            masks = noise_weights > 0, 
                                             labels = labels_batch,
                                             deterministic = False, 
                                             dropout_rng = subkey)
-            error = jnp.square(predicted_flow - optimal_flow) * noise_weights[:, :, None]
-            loss = jnp.mean(jnp.sum(error, axis = 1))
+            error = self.loss_func_vmap(predicted_flow, point_cloud_velocity, point_cloud_interpolates) * noise_weights
+            loss = jnp.mean(jnp.sum(error, axis=1))
             return loss
-        
+
+        # Time backpropagation
         loss, grads = jax.value_and_grad(loss_fn)(state.params)
         state = state.apply_gradients(grads=grads)
-        return (state, loss)
+
+        return state, loss, point_cloud_velocity, point_cloud_interpolates
+
+
 
     def sample_single_batch(self, single_batch, single_weights, key, n_points):
         indices = jax.random.choice(key, single_batch.shape[0], (n_points,), replace=False)
@@ -325,9 +344,11 @@ class WassersteinFlowMatching:
         training_steps=32000,
         batch_size=16,
         verbose=8,
-        learning_rate = 3e-4,
-        decay_steps = 1000,
+        peak_lr = 3e-4, 
+        end_lr = 3e-6,
+        warmup_steps = 5000,
         shape_sample = None,
+        source_sample = None,
         saved_state = None,
         key=random.key(0),
     ):
@@ -353,8 +374,10 @@ class WassersteinFlowMatching:
         if saved_state is None:
             self.state = self.create_train_state(
                 model=self.FlowMatchingModel,
-                learning_rate=learning_rate,
-                decay_steps=decay_steps,
+                peak_lr = peak_lr, 
+                end_lr = end_lr, 
+                training_steps = training_steps, 
+                warmup_steps = warmup_steps,
                 key=subkey
             )
         else:
@@ -368,6 +391,7 @@ class WassersteinFlowMatching:
 
         tq = trange(training_steps - self.state.step, leave=True, desc="")
         self.losses = []
+        self.vel, self.inter = [], []
         for training_step in tq:
 
             subkey, key = random.split(key, 2)
@@ -380,6 +404,9 @@ class WassersteinFlowMatching:
             
             if(self.matched_noise):
                 noise_samples, noise_weights = self.noise_point_clouds[batch_ind], self.noise_weights[batch_ind]
+                if(source_sample is not None):
+                    keys = jax.random.split(subkey, batch_size)
+                    noise_samples, noise_weights = sample_points(noise_samples, noise_weights, keys, source_sample)
             else:
                 noise_samples, noise_weights = None, None
 
@@ -396,10 +423,14 @@ class WassersteinFlowMatching:
 
             subkey, key = random.split(key, 2)
 
-            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, noise_samples, noise_weights, key = subkey)
+            self.state, loss, vel, inter = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, noise_samples, noise_weights, key = subkey)
 
             self.params = self.state.params
             self.losses.append(loss) 
+
+            self.vel.append(vel)
+            self.inter.append(inter)
+
 
             if(training_step % verbose == 0):
                 tq.set_description(": {:.3e}".format(loss))
@@ -419,7 +450,7 @@ class WassersteinFlowMatching:
             self.params = pickle.load(f)
 
     @partial(jit, static_argnums=(0,))
-    def get_flow(self, params, point_clouds, weights, t, labels = None):
+    def get_flow(self, params, point_clouds, weights, t, dt, labels = None):
 
         if(point_clouds.ndim == 2):
             point_clouds = point_clouds[None,:, :]
@@ -431,7 +462,9 @@ class WassersteinFlowMatching:
                     masks = weights>0, 
                     labels = labels,
                     deterministic = True))
-        return(flow)
+        
+        update = self.exponential_map_vmap(point_clouds, flow, dt)
+        return(update)
         
 
     def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None, init_noise = None, key = random.key(0)): 
@@ -493,8 +526,7 @@ class WassersteinFlowMatching:
         dt = 1/timesteps
 
         for t in tqdm(jnp.linspace(1, 0, timesteps)):
-            grad_fn = self.get_flow(self.params, noise[-1], noise_weights, t, generate_labels)
-            noise.append(noise[-1] + dt * grad_fn)
+            noise.append(self.get_flow(self.params, noise[-1], noise_weights, t, dt, generate_labels))
         if(generate_labels is None):
             return noise, noise_weights
-        return noise, noise_weights, [self.num_to_label[l] for l in np.array(generate_labels)]
+        return noise, noise_weights, [self.num_to_label[label] for label in np.array(generate_labels)]

@@ -1,7 +1,7 @@
 import pytest # type: ignore
 import numpy as np # type: ignore
 
-from wassersteinflowmatching import WassersteinFlowMatching
+from src.wassersteinflowmatching.wasserstein import WassersteinFlowMatching
 
 @pytest.fixture
 def WassersteinFlowMatchingModel():
@@ -13,11 +13,12 @@ def WassersteinFlowMatchingModel():
     return(Model)
 
 def test_train(WassersteinFlowMatchingModel):
-    WassersteinFlowMatchingModel.train(training_steps = 1)
+    WassersteinFlowMatchingModel.train(training_steps = 10,
+                                       warmup_steps = 2)
     
     
 def test_flow(WassersteinFlowMatchingModel):
-    WassersteinFlowMatchingModel.train(training_steps = 1)
-
+    WassersteinFlowMatchingModel.train(training_steps = 10,
+                                       warmup_steps = 2)
     WassersteinFlowMatchingModel.generate_samples(num_samples = 10, 
                                                   timesteps = 100)
