@@ -13,10 +13,12 @@ def RiemannianWassersteinFlowMatchingModel():
     return(Model)
 
 def test_train(RiemannianWassersteinFlowMatchingModel):
-    RiemannianWassersteinFlowMatchingModel.train(training_steps = 1)
+    RiemannianWassersteinFlowMatchingModel.train(training_steps = 10,
+                                                 warmup_steps = 2)
     
     
 def test_flow(RiemannianWassersteinFlowMatchingModel):
-    RiemannianWassersteinFlowMatchingModel.train(training_steps = 1)
+    RiemannianWassersteinFlowMatchingModel.train(training_steps = 10,
+                                                 warmup_steps = 2)
     RiemannianWassersteinFlowMatchingModel.generate_samples(num_samples = 10, 
                                                   timesteps = 100)
