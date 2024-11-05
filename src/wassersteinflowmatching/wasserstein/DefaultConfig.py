@@ -32,7 +32,7 @@ class DefaultConfig:
     wasserstein_lse: bool = True
     num_sinkhorn_iters: int = 200
     mini_batch_ot_mode: bool = True
-    mini_batch_ot_solver: str = 'frechet'
+    mini_batch_ot_solver: str = 'chamfer'
     minibatch_ot_eps: float = 0.01
     minibatch_ot_lse: bool = True
     noise_type: str = 'chol_normal'

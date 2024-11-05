@@ -44,11 +44,16 @@ class BuresWassersteinFlowMatching:
         noise_covariances = None,
         matched_noise = False,
         config = DefaultConfig,
+        **kwargs,
     ):
 
         
 
         self.config = config
+
+        for key, value in kwargs.items():
+            setattr(self.config, key, value)
+        
         self.point_clouds = point_clouds
 
 

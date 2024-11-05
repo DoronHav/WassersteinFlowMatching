@@ -36,6 +36,7 @@ class WassersteinFlowMatching:
         noise_point_clouds = None,
         matched_noise = False,
         config = DefaultConfig,
+        **kwargs,
     ):
 
 
@@ -43,6 +44,10 @@ class WassersteinFlowMatching:
         print("Initializing WassersteinFlowMatching")
 
         self.config = config
+
+        for key, value in kwargs.items():
+            setattr(self.config, key, value)
+        
         self.scaling = self.config.scaling
         self.factor = self.config.factor
 
