@@ -234,7 +234,7 @@ class WassersteinFlowMatching:
         #     learning_rate, decay_steps, 0.97, staircase = False,
         # )
 
-        tx = optax.adam(lr_sched)  #
+        tx = optax.adamw(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
