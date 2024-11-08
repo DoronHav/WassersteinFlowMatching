@@ -5,8 +5,6 @@ import jax # type: ignore
 from jax import lax # type: ignore
 from jax import random # type: ignore
 
-import wassersteinflowmatching.riemannian_wasserstein.utils_Sphere as utils_Sphere # type: ignore
-import wassersteinflowmatching.riemannian_wasserstein.utils_Hyperbole as utils_Hyperbole # type: ignore
 
 
 def sample_ot_matrix(mat, key):
@@ -172,7 +170,7 @@ def euclidean_distance(pc_x, pc_y):
     dist = jnp.mean(jnp.sum((pc_x - pc_y)**2, axis = 1))
     return(dist)
 
-def chamfer_distance(pc_x, pc_y, geom):
+def chamfer_distance(pc_x, pc_y, distance_matrix_func):
     
     pc_x, w_x = pc_x
     pc_y, w_y = pc_y
@@ -180,10 +178,9 @@ def chamfer_distance(pc_x, pc_y, geom):
     w_x_bool = w_x > 0
     w_y_bool = w_y > 0
 
-    if(geom == 'sphere'):
-        pairwise_dist = utils_Sphere.distance_matrix(pc_x, pc_y)
-    else:
-        pairwise_dist = utils_Hyperbole.distance_matrix(pc_x, pc_y)
+    pairwise_dist = distance_matrix_func(pc_x, pc_y)
+
+
 
     # set pairwise_dist where w_x is zero to infinity
 
@@ -235,11 +232,11 @@ def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True):
 
 
 
-def transport_plan(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
-    distmat = utils_Sphere.distance_matrix(pc_x, pc_y)
+    distmat = distance_matrix_func(pc_x, pc_y)
     
     ot_solve = linear.solve(
         ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost'),
