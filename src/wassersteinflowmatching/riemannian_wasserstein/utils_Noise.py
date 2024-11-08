@@ -64,21 +64,19 @@ def sample_gaussian_points_chol(key, cov_matrix_chol, n):
 
 
 def uniform(size, noise_config, key = random.key(0)):
-    minval = -1
-    maxval = 1
+    minval = noise_config.minval
+    maxval = noise_config.maxval
     subkey, key = random.split(key)
     noise_samples = random.uniform(subkey, size,
                                     minval = minval, maxval = maxval)
-    noise_samples = jnp.nan_to_num(noise_samples / jnp.linalg.norm(noise_samples, axis = -1, keepdims = True), nan = 1/noise_samples.shape[-1])
     return(noise_samples)
 
 def normal(size, noise_config, key = random.key(0)):
-    minval = -1
-    maxval = 1
+    minval = noise_config.minval
+    maxval =noise_config.maxval
     subkey, key = random.split(key)
     noise_samples = random.truncated_normal(subkey, shape = size, upper = 3, lower = -3)
     noise_samples = minval + (maxval - minval) * (noise_samples + 3) / 6
-    noise_samples = jnp.nan_to_num(noise_samples / jnp.linalg.norm(noise_samples, axis = -1, keepdims = True), nan = 1/noise_samples.shape[-1])
     return(noise_samples)
 
 
@@ -109,8 +107,7 @@ def meta_normal(size, noise_config, key):
     
     # Sample n points from Gaussian for each covariance matrix
     keys = random.split(gaussian_key, K)
-    points = jax.vmap(lambda key, cov: sample_gaussian_points(key, cov, n))(keys, cov_matrices)
-    points = jnp.nan_to_num(points / jnp.linalg.norm(points, axis = -1, keepdims = True), nan = 1/points.shape[-1])
+    points = jax.vmap(lambda key, cov: sample_gaussian_points(key, cov, n))(keys, cov_matrices) + noise_config.mean[None, None, :]
     return points
 
 def chol_normal(size, noise_config, key):
@@ -139,8 +136,7 @@ def chol_normal(size, noise_config, key):
     
     # Sample n points from Gaussian for each covariance matrix
     keys = random.split(gaussian_key, K)
-    points = jax.vmap(lambda key, cov: sample_gaussian_points_chol(key, cov, n))(keys, cov_matrices_chol)
-    points = jnp.nan_to_num(points / jnp.linalg.norm(points, axis = -1, keepdims = True), nan = 1/points.shape[-1])
+    points = jax.vmap(lambda key, cov: sample_gaussian_points_chol(key, cov, n))(keys, cov_matrices_chol) + noise_config.mean
     return points
 
 def random_pointclouds(size, noise_config, key):
@@ -157,6 +153,5 @@ def random_pointclouds(size, noise_config, key):
     
     sampled_pointclouds = jnp.take(noise_pointclouds, noise_inds, axis=0)
     sampled_weights = jnp.take(noise_weights, noise_inds, axis=0)
-
     return sampled_pointclouds, sampled_weights
 

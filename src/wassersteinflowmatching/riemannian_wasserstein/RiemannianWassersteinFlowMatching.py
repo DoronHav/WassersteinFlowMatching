@@ -11,8 +11,7 @@ from flax.training import train_state # type: ignore
 import pickle # type: ignore
 
 import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
-import wassersteinflowmatching.riemannian_wasserstein.utils_Sphere as utils_Sphere # type: ignore
-import wassersteinflowmatching.riemannian_wasserstein.utils_Hyperbole as utils_Hyperbole # type: ignore
+import wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
 import wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
 from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
@@ -54,8 +53,26 @@ class RiemannianWassersteinFlowMatching:
         self.scaling = self.config.scaling
         self.factor = self.config.factor
 
-        self.point_clouds = self.scale_func(point_clouds)
 
+        self.monge_map = self.config.monge_map
+        self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
+
+
+        print(f"Using {self.monge_map} map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
+
+
+        self.geom_utils = getattr(utils_Geom, self.geom)()
+        
+        print(f'Using {self.geom} geometry')
+
+        self.interpolant_vmap = jax.vmap(jax.vmap(self.geom_utils.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+        self.interpolant_velocity_vmap = jax.vmap(jax.vmap(self.geom_utils.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+        self.exponential_map_vmap = jax.vmap(jax.vmap(self.geom_utils.exponential_map, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, None), out_axes=0)
+        self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
+        self.project_to_geometry = self.geom_utils.project_to_geometry
+
+
+        self.point_clouds = [np.asarray(self.project_to_geometry(pc)) for pc in point_clouds]
 
         self.weights = [
             np.ones(pc.shape[0]) / pc.shape[0] for pc in self.point_clouds
@@ -66,12 +83,9 @@ class RiemannianWassersteinFlowMatching:
         )
 
         self.space_dim = self.point_clouds.shape[-1]
-        self.monge_map = self.config.monge_map
-        self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
 
-
-        print(f"Using {self.monge_map} map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
         self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan, 
+                                            distance_matrix_func =  self.geom_utils.distance_matrix,
                                             eps = self.config.wasserstein_eps, 
                                             lse_mode = self.config.wasserstein_lse, 
                                             num_iteration = self.config.num_sinkhorn_iters),
@@ -82,22 +96,6 @@ class RiemannianWassersteinFlowMatching:
         else:
             self.sample_map_jit = jax.vmap(utils_OT.sample_ot_matrix, (0, 0), 0)
         
-
-        
-        if(self.geom == 'sphere'):
-            print("Using Sphere Geometry")
-            self.interpolant_vmap = jax.vmap(jax.vmap(utils_Sphere.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
-            self.interpolant_velocity_vmap = jax.vmap(jax.vmap(utils_Sphere.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
-            self.exponential_map_vmap = jax.vmap(jax.vmap(utils_Sphere.exponential_map, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, None), out_axes=0)
-        else:
-            print("Using Hyperbolic Geometry")
-            self.interpolant_vmap = jax.vmap(jax.vmap(utils_Hyperbole.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
-            self.interpolant_velocity_vmap = jax.vmap(jax.vmap(utils_Hyperbole.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
-            self.exponential_map_vmap = jax.vmap(jax.vmap(utils_Hyperbole.exponential_map, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, None), out_axes=0)
-            
-        
-        self.loss_func_vmap = jax.vmap(jax.vmap(utils_Sphere.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
-
 
         self.noise_config = types.SimpleNamespace()
         if(noise_point_clouds is not None):
@@ -127,13 +125,17 @@ class RiemannianWassersteinFlowMatching:
                 self.covariance_barycenter = utils_OT.covariance_barycenter(self.point_clouds_cov, max_iter = 100, tol = 1e-6)
                 self.noise_config.covariance_barycenter_chol = jnp.linalg.cholesky(self.covariance_barycenter)
                 self.noise_config.noise_df_scale = self.config.noise_df_scale
-            if(self.noise_type == 'chol_normal'):
+            elif(self.noise_type == 'chol_normal'):
                 self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
                 self.cov_chol = jax.vmap(jnp.linalg.cholesky)(self.point_clouds_cov)
+                self.noise_config.mean = jnp.mean(self.point_clouds_mean, axis = 0)
                 self.noise_config.cov_chol_mean = jnp.mean(self.cov_chol, axis = 0)
                 self.noise_config.cov_chol_std = jnp.std(self.cov_chol, axis = 0)
                 self.noise_config.noise_df_scale = self.config.noise_df_scale
- 
+            else:
+                self.noise_config.mean = jnp.mean(self.point_clouds, axis = 0)
+                self.noise_config.minval = self.config.min_val
+                self.noise_config.maxval = self.config.max_val
 
         self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
 
@@ -160,7 +162,7 @@ class RiemannianWassersteinFlowMatching:
             elif(self.mini_batch_ot_solver == 'chamfer'):
                 print("Chamfer Mini-Batch")
                 self.ot_mat_jit = jax.vmap(partial(utils_OT.chamfer_distance, 
-                                            geom = self.geom), (0, 0), 0)
+                                            distance_matrix_func = self.geom_utils.distance_matrix), (0, 0), 0)
             elif(self.mini_batch_ot_solver == 'euclidean'):
                 print("Euclidean Mini-Batch")
                 self.ot_mat_jit = jax.vmap(utils_OT.euclidean_distance, (0, 0), 0)
@@ -170,35 +172,6 @@ class RiemannianWassersteinFlowMatching:
         
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
-    def scale_func(self, point_clouds):
-        """
-        :meta private:
-        """
-        if(self.geom == 'sphere'):
-            point_clouds = [pc/np.linalg.norm(pc, axis = 1, keepdims = True) for pc in point_clouds]
-        else:
-            
-            normalized_clouds = []
-    
-            for pc in point_clouds:
-                branch_sign = np.sign(pc[:, 0])
-        
-                hyperbolic_norm = np.sqrt(np.abs(pc[:, 0]**2 - pc[:, 1]**2))
-                
-                # Scale points to satisfy x² - y² = 1
-                # First normalize by hyperbolic norm, then multiply x component by branch sign
-                normalized_pc = pc / hyperbolic_norm[:, np.newaxis]
-                normalized_pc[:, 0] = np.where(
-                    hyperbolic_norm > 0,
-                    branch_sign * np.sqrt(1 + normalized_pc[:, 1]**2),
-                    normalized_pc[:, 0]
-                )
-                
-                normalized_clouds.append(normalized_pc)
-            
-            point_clouds = normalized_clouds
-            
-        return point_clouds
     
 
     def create_train_state(self, model, peak_lr, end_lr, training_steps, warmup_steps, key = random.key(0)):
@@ -282,7 +255,7 @@ class RiemannianWassersteinFlowMatching:
         subkey_t, subkey_noise, key = random.split(key, 3)
 
         if noise_samples is None:
-            # Time noise_func
+
             noise_samples = self.noise_func(size=point_clouds_batch.shape, 
                                             noise_config=self.noise_config,
                                             key=subkey_noise)
@@ -290,6 +263,8 @@ class RiemannianWassersteinFlowMatching:
                 noise_samples, noise_weights = noise_samples
             else:
                 noise_weights = weights_batch
+            
+            noise_samples = self.project_to_geometry(noise_samples)
 
         if self.mini_batch_ot_mode:
             # Time minibatch_ot operation
