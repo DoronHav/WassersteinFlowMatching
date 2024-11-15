@@ -234,7 +234,7 @@ class WassersteinFlowMatching:
         #     learning_rate, decay_steps, 0.97, staircase = False,
         # )
 
-        tx = optax.adamw(lr_sched)  #
+        tx = optax.adam(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
@@ -261,7 +261,6 @@ class WassersteinFlowMatching:
 
         noise_ind = utils_OT.ot_mat_from_distance(ot_matrix, 0.002, True)
         return(noise_ind)
-
 
 
 
@@ -387,6 +386,7 @@ class WassersteinFlowMatching:
             print(f'Sampling {shape_sample} points from each point cloud')
             sample_points = jax.vmap(self.sample_single_batch, in_axes=(0, 0, 0, None))
 
+
         tq = trange(training_steps - self.state.step, leave=True, desc="")
         self.losses = []
         for training_step in tq:
@@ -500,12 +500,6 @@ class WassersteinFlowMatching:
                 init_noise = init_noise[None, :, :]
             noise = [init_noise]
         else:
-
-            # noise = self.noise_func(size =[num_samples, size, self.space_dim], 
-            #             minval = self.min_val, 
-            #             maxval = self.max_val, key = subkey)
-
-
             noise = self.noise_func(size = [num_samples, size, self.space_dim], 
                                       noise_config = self.noise_config,
                                       key = subkey)

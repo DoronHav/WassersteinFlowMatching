@@ -4,6 +4,8 @@ from ott.solvers import linear # type: ignore
 import jax # type: ignore
 from jax import lax # type: ignore
 from jax import random # type: ignore
+import ot # type: ignore
+import numpy as np # type: ignore
 
 def argmax_row_iter(M):
     """
@@ -134,8 +136,8 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
 
 
 def euclidean_distance(pc_x, pc_y): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
+    pc_x, _ = pc_x[0], pc_x[1]
+    pc_y, _ = pc_y[0], pc_y[1]
 
     dist = jnp.mean(jnp.sum((pc_x - pc_y)**2, axis = 1))
     return(dist)
@@ -186,7 +188,6 @@ def chamfer_distance(pc_x, pc_y):
 
     chamfer_dist = jnp.sum(pairwise_dist.min(axis = 0) * w_y) + jnp.sum(pairwise_dist.min(axis = 1) * w_x)
     return chamfer_dist
-
 
 def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
     ot_solve = linear.solve(
@@ -263,6 +264,7 @@ def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iterati
     delta = pc_y[map_ind]-pc_x
     return(delta, ot_solve)
 
+
 def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
@@ -277,9 +279,21 @@ def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteratio
     
     return(ot_solve.matrix, ot_solve)
 
-def transport_plan_euclidean(pc_x, pc_y): 
+def transport_plan_unreg(pc_x, pc_y): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
+    T = ot.emd(w_x, w_y, ot.dist(pc_x, pc_y))
+
+    map_ind = np.argmax(T, axis=1)
+    delta = pc_y[map_ind] - pc_x
+
+    return(delta, T)
+
+def transport_plan_euclidean(pc_x, pc_y): 
+    pc_x, _ = pc_x[0], pc_x[1]
+    pc_y, _ = pc_y[0], pc_y[1]
+
     delta = pc_y - pc_x
     return(delta, 0)
+
