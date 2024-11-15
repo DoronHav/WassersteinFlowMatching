@@ -16,6 +16,7 @@ ott-jax = "^0.4.6"
 clu = "^0.0.12"
 tqdm = "^4.66.2"
 tensorflow_probability = "^0.24.0"
+pot = "^0.9.4"
 
 [build-system]
 requires = ["poetry-core"]
