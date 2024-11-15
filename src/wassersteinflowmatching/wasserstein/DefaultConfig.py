@@ -37,7 +37,7 @@ class DefaultConfig:
     minibatch_ot_lse: bool = True
     noise_type: str = 'chol_normal'
     scaling: str = 'None'
-    noise_df_scale: float = 2
+    noise_df_scale: float = 2.0
     factor: float = 1.0
     embedding_dim: int = 512
     num_layers: int = 6
