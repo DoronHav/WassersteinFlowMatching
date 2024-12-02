@@ -73,9 +73,9 @@ class WassersteinFlowMatching:
                                                        lse_mode = self.config.wasserstein_lse, 
                                                        num_iteration = self.config.num_sinkhorn_iters),
                                                        (0, 0), 0)
-        elif(self.monge_map == 'row_iter'):
-            print(f"Using row_iter map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-            self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan_rowiter, 
+        elif(self.monge_map == 'rounded_matching'):
+            print(f"Using rounded_matching map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
+            self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan_rounded, 
                                             eps = self.config.wasserstein_eps, 
                                             lse_mode = self.config.wasserstein_lse, 
                                             num_iteration = self.config.num_sinkhorn_iters),
@@ -144,12 +144,19 @@ class WassersteinFlowMatching:
 
 
         if(labels is not None):
-            self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
-            self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
-            self.labels = jnp.array([self.label_to_num[label] for label in labels])
-            self.label_dim = len(np.unique(labels))
-            self.config.label_dim = self.label_dim 
             self.mini_batch_ot_mode = False
+            if(isinstance(labels, (str, int))):
+                self.discrete_labels = True
+                self.config.discrete_labels = True
+                self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
+                self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
+                self.labels = jnp.array([self.label_to_num[label] for label in labels])
+                self.label_dim = len(np.unique(labels))
+                self.config.label_dim = self.label_dim 
+            else:
+                self.discrete_labels = False
+                self.config.discrete_labels = False
+                self.labels = labels[None, :] if labels.ndim == 1 else labels
         else:
             self.labels = None
             self.label_dim = -1
@@ -207,11 +214,12 @@ class WassersteinFlowMatching:
         subkey, key = random.split(key)
 
         if(self.labels is not None):
+            labels_input = self.labels[np.random.choice(self.labels.shape[0], attn_inputs.shape[0])]
             params = model.init(rngs={"params": subkey}, 
                                 point_cloud = attn_inputs, 
                                 t = jnp.ones((attn_inputs.shape[0])), 
                                 masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
-                                labels =  jnp.ones((attn_inputs.shape[0])),
+                                labels = labels_input,
                                 deterministic = True)['params']
         else:
             params = model.init(rngs={"params": subkey}, 
@@ -456,7 +464,14 @@ class WassersteinFlowMatching:
                     labels = labels,
                     deterministic = True))
         return(flow)
-        
+    
+    def transform_labels(self, labels, inverse = False):
+        if(self.discrete_labels):
+            if(inverse):
+                return [self.num_to_label[label] for label in labels]
+            return jnp.array([self.label_to_num[label] for label in labels])
+        else:
+            return labels
 
     def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None, init_noise = None, key = random.key(0)): 
         """
@@ -480,19 +495,29 @@ class WassersteinFlowMatching:
                 subkey, key = random.split(key)
                 noise_weights = random.choice(subkey, self.weights, [num_samples])
         else:
-            if(generate_labels is None):
-                generate_labels = random.choice(key, self.label_dim, [num_samples], replace = True)
-            elif(isinstance(generate_labels, (str, int))):
-                generate_labels = jnp.array([self.label_to_num[generate_labels]] * num_samples)
+            if(self.discrete_labels):
+                if(generate_labels is None):
+                    generate_labels = random.choice(key, self.label_dim, [num_samples], replace = True)
+                elif(isinstance(generate_labels, (str, int))):
+                    generate_labels = jnp.repeat(self.transform_labels([generate_labels]), num_samples)
+                else:
+                    generate_labels = self.transform_labels(generate_labels)
+                
+                if(noise_weights is None):
+                    noise_weights = []
+                    for label in generate_labels:
+                        subkey, key = random.split(key)
+                        noise_weights.append(random.choice(subkey, self.weights[self.labels == label]))
+                    noise_weights = jnp.vstack(noise_weights)
             else:
-                generate_labels = jnp.array([self.label_to_num[label] for label in generate_labels])
-            
-            if(noise_weights is None):
-                noise_weights = []
-                for label in generate_labels:
+                if(generate_labels is None):
+                    generate_labels = self.labels[np.random.choice(self.labels.shape[0], num_samples, replace = False)]
+                elif(generate_labels.ndim == 1):
+                    generate_labels = np.tile(generate_labels[None, :], [num_samples, 1])
+
+                if(noise_weights is None):
                     subkey, key = random.split(key)
-                    noise_weights.append(random.choice(subkey, self.weights[self.labels == label]))
-                noise_weights = jnp.vstack(noise_weights)
+                    noise_weights = random.choice(subkey, self.weights, [num_samples])
         subkey, key = random.split(key)
 
         if(init_noise is not None):
@@ -515,4 +540,4 @@ class WassersteinFlowMatching:
             noise.append(noise[-1] + dt * grad_fn)
         if(generate_labels is None):
             return noise, noise_weights
-        return noise, noise_weights, [self.num_to_label[label] for label in np.array(generate_labels)]
+        return noise, noise_weights, self.transform_labels(generate_labels, inverse = False)

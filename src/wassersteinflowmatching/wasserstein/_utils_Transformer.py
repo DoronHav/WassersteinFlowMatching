@@ -89,7 +89,10 @@ class AttentionNN(nn.Module):
 
 
         if(labels is not None):
-            l_emb = nn.Dense(features = concat_dim)(jax.nn.one_hot(labels, config.label_dim))
+            if(config.discrete_labels):
+                l_emb = nn.Dense(features = concat_dim)(jax.nn.one_hot(labels, config.label_dim))
+            else:
+                l_emb = nn.Dense(features = concat_dim)(labels)
             x = jnp.concatenate([x, 
                                  jnp.tile(l_emb[:, None, :], [1, point_cloud.shape[1], 1])], axis = -1)
 
