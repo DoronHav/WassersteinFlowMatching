@@ -7,7 +7,7 @@ from jax import random # type: ignore
 import ot # type: ignore
 import numpy as np # type: ignore
 
-def argmax_row_iter(M):
+def rounded_matching(M):
     """
     Convert a soft assignment matrix M to a hard assignment vector
     by iteratively finding the largest value in M and making assignments.
@@ -195,7 +195,7 @@ def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True):
         lse_mode = lse_mode,
         min_iterations = 200,
         max_iterations = 200)
-    map_ind = argmax_row_iter(ot_solve.matrix)
+    map_ind = rounded_matching(ot_solve.matrix)
     return(map_ind)
 
 def sample_ot_matrix(pc_x, pc_y, mat, key):
@@ -248,7 +248,7 @@ def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteratio
     delta = pc_y[map_ind]-pc_x
     return(delta, ot_solve)
 
-def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_rounded(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -260,7 +260,7 @@ def transport_plan_rowiter(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iterati
         max_iterations = num_iteration,
         lse_mode = lse_mode)
     
-    map_ind = argmax_row_iter(ot_solve.matrix)
+    map_ind = rounded_matching(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
     return(delta, ot_solve)
 
