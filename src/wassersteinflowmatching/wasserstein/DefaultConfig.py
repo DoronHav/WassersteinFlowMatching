@@ -27,7 +27,7 @@ class DefaultConfig:
     :param kernel_init: (Callable) initializer of kernel weights (default nn.initializers.glorot_uniform())
     :param bias_init: ((Callable) initializer of bias weights (default nn.initializers.zeros_init())
     """ 
-    monge_map: str = 'row_iter'
+    monge_map: str = 'rounded_matching'
     wasserstein_eps: float = 0.002
     wasserstein_lse: bool = True
     num_sinkhorn_iters: int = 200
