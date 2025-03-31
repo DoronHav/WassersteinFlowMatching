@@ -1,7 +1,7 @@
 import pytest # type: ignore
 import numpy as np # type: ignore
 
-from src.wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
+from wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
 
 @pytest.fixture
 def RiemannianWassersteinFlowMatchingModel():
