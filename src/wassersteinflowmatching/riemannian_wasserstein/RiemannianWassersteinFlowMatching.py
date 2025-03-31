@@ -505,7 +505,7 @@ class RiemannianWassersteinFlowMatching:
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)):
+        for t in tqdm(jnp.linspace(1, dt, timesteps)):
             noise.append(self.get_flow(self.params, noise[-1], noise_weights, t, dt, generate_labels))
         if(generate_labels is None):
             return noise, noise_weights

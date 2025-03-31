@@ -138,12 +138,29 @@ def chol_normal(size, noise_config, key):
 
     minval = noise_config.minval
     maxval = noise_config.maxval
-    cov_chol_mean = noise_config.cov_chol_mean
-    cov_chol_std = noise_config.cov_chol_std * noise_config.noise_df_scale
-
     K, n, d = size
-    wishart_key, gaussian_key = random.split(key)
-    cov_matrices_chol = (random.normal(wishart_key, (K, d, d)) * cov_chol_std + cov_chol_mean)
+    chol_key, gaussian_key = random.split(key, 2)
+    
+    # Get the mean and std of Cholesky factors
+    chol_mean = noise_config.cov_chol_mean
+    chol_std = noise_config.cov_chol_std * noise_config.noise_df_scale
+    
+    # Ensure we're only modifying the lower triangular part
+    lower_mask = jnp.tril(jnp.ones((d, d)))
+    
+    # Generate the perturbations in the lower triangular space
+    perturbations = random.normal(chol_key, (K, d, d)) * chol_std * lower_mask
+    
+    # Use the mean Cholesky factor as the base
+    cov_matrices_chol = chol_mean + perturbations
+    
+    # Force diagonal elements to be positive (required for a valid Cholesky factor)
+    diag_indices = jnp.diag_indices(d)
+    diag_values = jnp.diagonal(cov_matrices_chol, axis1=1, axis2=2)
+    diag_values = jnp.abs(diag_values) + 1e-6  # Ensure positive diagonals
+    
+    # Update the diagonal elements
+    cov_matrices_chol = cov_matrices_chol.at[:, diag_indices[0], diag_indices[1]].set(diag_values)
     
     # Sample n points from Gaussian for each covariance matrix
     keys = random.split(gaussian_key, K)

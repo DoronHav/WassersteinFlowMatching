@@ -145,7 +145,7 @@ class WassersteinFlowMatching:
 
         if(labels is not None):
             self.mini_batch_ot_mode = False
-            if(isinstance(labels, (str, int))):
+            if(isinstance(labels[0], (str, int))):
                 self.discrete_labels = True
                 self.config.discrete_labels = True
                 self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
@@ -198,7 +198,7 @@ class WassersteinFlowMatching:
         return point_clouds
     
 
-    def create_train_state(self, model, peak_lr, end_lr, training_steps, warmup_steps, key = random.key(0)):
+    def create_train_state(self, model, learning_rate, decay_steps, key = random.key(0)):
         """
         :meta private:
         """
@@ -230,24 +230,24 @@ class WassersteinFlowMatching:
 
     
 
-        lr_sched = optax.warmup_cosine_decay_schedule(
-            init_value=peak_lr/100,
-            peak_value=peak_lr,
-            warmup_steps=warmup_steps,
-            decay_steps=training_steps - warmup_steps,
-            end_value=end_lr
-        )
-        
-        # lr_sched = optax.exponential_decay(
-        #     learning_rate, decay_steps, 0.97, staircase = False,
+        # lr_sched = optax.warmup_cosine_decay_schedule(
+        #     init_value=peak_lr/100,
+        #     peak_value=peak_lr,
+        #     warmup_steps=warmup_steps,
+        #     decay_steps=training_steps - warmup_steps,
+        #     end_value=end_lr
         # )
+        
+        lr_sched = optax.exponential_decay(
+            learning_rate, decay_steps, 0.998, staircase = False,
+        )
 
         tx = optax.adam(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 
-    def minibatch_ot(self, point_clouds, point_cloud_weights, noise, noise_weights, key = random.key(0)):
+    def minibatch_ot(self, point_clouds, point_cloud_weights, noise, noise_weights):
 
         """
         :meta private:
@@ -293,8 +293,7 @@ class WassersteinFlowMatching:
 
         if self.mini_batch_ot_mode:
             # Time minibatch_ot operation
-            minibatch_key, key = random.split(key)
-            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key=minibatch_key)
+            noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights)
             noise_samples = noise_samples[noise_ind]
             if(self.monge_map == 'entropic'):
                 noise_weights = noise_weights[noise_ind]
@@ -349,9 +348,8 @@ class WassersteinFlowMatching:
         training_steps=32000,
         batch_size=16,
         verbose=8,
-        peak_lr = 3e-4, 
-        end_lr = 3e-6,
-        warmup_steps = 5000,
+        learning_rate = 2e-4, 
+        decay_steps = 1000,
         shape_sample = None,
         source_sample = None,
         saved_state = None,
@@ -379,10 +377,8 @@ class WassersteinFlowMatching:
         if saved_state is None:
             self.state = self.create_train_state(
                 model=self.FlowMatchingModel,
-                peak_lr = peak_lr, 
-                end_lr = end_lr, 
-                training_steps = training_steps, 
-                warmup_steps = warmup_steps,
+                learning_rate = learning_rate, 
+                decay_steps = decay_steps, 
                 key=subkey
             )
         else:
@@ -469,7 +465,7 @@ class WassersteinFlowMatching:
         if(self.discrete_labels):
             if(inverse):
                 return [self.num_to_label[label] for label in labels]
-            return jnp.array([self.label_to_num[label] for label in labels])
+            return np.asarray([self.label_to_num[label] for label in labels])
         else:
             return labels
 
@@ -485,15 +481,15 @@ class WassersteinFlowMatching:
         """ 
         if(size is None):
             size = self.point_clouds.shape[1]
-            noise_weights = None
+            particle_weights = None
         else:
-            noise_weights = jnp.ones([num_samples, size])
+            particle_weights = jnp.ones([num_samples, size])
 
         if(self.labels is None):
             generate_labels = None
-            if(noise_weights is None):
+            if(particle_weights is None):
                 subkey, key = random.split(key)
-                noise_weights = random.choice(subkey, self.weights, [num_samples])
+                particle_weights = random.choice(subkey, self.weights, [num_samples])
         else:
             if(self.discrete_labels):
                 if(generate_labels is None):
@@ -503,41 +499,46 @@ class WassersteinFlowMatching:
                 else:
                     generate_labels = self.transform_labels(generate_labels)
                 
-                if(noise_weights is None):
-                    noise_weights = []
+                if(particle_weights is None):
+                    particle_weights = []
                     for label in generate_labels:
                         subkey, key = random.split(key)
-                        noise_weights.append(random.choice(subkey, self.weights[self.labels == label]))
-                    noise_weights = jnp.vstack(noise_weights)
+                        particle_weights.append(random.choice(subkey, self.weights[self.labels == label]))
+                    particle_weights = jnp.vstack(particle_weights)
             else:
                 if(generate_labels is None):
                     generate_labels = self.labels[np.random.choice(self.labels.shape[0], num_samples, replace = False)]
                 elif(generate_labels.ndim == 1):
                     generate_labels = np.tile(generate_labels[None, :], [num_samples, 1])
 
-                if(noise_weights is None):
+                if(particle_weights is None):
                     subkey, key = random.split(key)
-                    noise_weights = random.choice(subkey, self.weights, [num_samples])
+                    particle_weights = random.choice(subkey, self.weights, [num_samples])
         subkey, key = random.split(key)
 
         if(init_noise is not None):
             if(init_noise.ndim == 2):
                 init_noise = init_noise[None, :, :]
-            noise = [init_noise]
+            generated_samples = [init_noise]
         else:
             noise = self.noise_func(size = [num_samples, size, self.space_dim], 
                                       noise_config = self.noise_config,
                                       key = subkey)
             if(len(noise) == 2):
-                noise, noise_weights = noise
-            noise =  [noise]
+                noise, particle_weights = noise
+            generated_samples = [noise]
 
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)):
-            grad_fn = self.get_flow(self.params, noise[-1], noise_weights, t, generate_labels)
-            noise.append(noise[-1] + dt * grad_fn)
+        for t in tqdm(jnp.linspace(1, dt, timesteps)):
+            xt = generated_samples[-1]
+            vt = self.get_flow(self.params, xt, particle_weights, t, generate_labels)
+            x_mid = generated_samples[-1] + 0.5 * dt * vt
+
+            v_mid = self.get_flow(self.params, x_mid, particle_weights, t+dt*0.5, generate_labels)
+            x_t_plus_dt = xt + dt * v_mid
+            generated_samples.append(x_t_plus_dt)
         if(generate_labels is None):
-            return noise, noise_weights
-        return noise, noise_weights, self.transform_labels(generate_labels, inverse = False)
+            return generated_samples, particle_weights
+        return generated_samples, particle_weights, self.transform_labels(generate_labels, inverse = True)

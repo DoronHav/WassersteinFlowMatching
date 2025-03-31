@@ -374,7 +374,7 @@ class BuresWassersteinFlowMatching:
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)):
+        for t in tqdm(jnp.linspace(1, dt, timesteps)):
             grad_fn = self.get_flow(generated_samples[-1][0], generated_samples[-1][1], t, generate_labels)
 
             mu_t = generated_samples[-1][0] + dt * grad_fn[0]
