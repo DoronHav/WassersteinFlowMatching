@@ -41,31 +41,43 @@ def rounded_matching(M):
 
     return assignment
 
-def weighted_mean_and_covariance(pc_x, weights):
+def weighted_mean_and_covariance(pc_x, weights, epsilon=1e-6):
     """
-    Calculate weighted mean and covariance for a batch of point clouds.
+    Calculate weighted mean and covariance for a batch of point clouds with improved numerical stability.
     
     Args:
     pc_x: Array of shape (batch_size, num_points, num_dimensions)
     weights: Array of shape (batch_size, num_points)
+    epsilon: Small constant for numerical stability
     
     Returns:
     weighted_mean: Array of shape (batch_size, num_dimensions)
     weighted_cov: Array of shape (batch_size, num_dimensions, num_dimensions)
     """
+    # Ensure weights are positive (avoid division by zero)
+    safe_weights = jnp.maximum(weights, epsilon)
     
-    # Ensure weights sum to 1 for each point cloud in the batch
-    normalized_weights = weights / jnp.sum(weights, axis=1, keepdims=True)
+    # Normalize weights to sum to 1 for each point cloud
+    weight_sums = jnp.sum(safe_weights, axis=1, keepdims=True)
+    normalized_weights = safe_weights / weight_sums
     
     # Calculate weighted mean
     weighted_mean = jnp.sum(pc_x * normalized_weights[:, :, jnp.newaxis], axis=1)
     
-    # Calculate weighted covariance
+    # Calculate weighted covariance with better numerical stability
     centered_pc = pc_x - weighted_mean[:, jnp.newaxis, :]
+    
+    # Compute weighted covariance
     weighted_cov = jnp.einsum('bij,bik,bi->bjk', centered_pc, centered_pc, normalized_weights)
     
+    # Ensure symmetry (can be broken by numerical issues)
+    weighted_cov = (weighted_cov + jnp.transpose(weighted_cov, axes=(0, 2, 1))) / 2.0
+    
+    # Add small regularization to ensure positive-definiteness
+    reg_term = epsilon * jnp.eye(pc_x.shape[-1])[None, :, :]
+    weighted_cov = weighted_cov + reg_term
+    
     return weighted_mean, weighted_cov
-
 
 def covariance_barycenter(cov_matrices, weights=None, max_iter=100, tol=1e-6):
     """

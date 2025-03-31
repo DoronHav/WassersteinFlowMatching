@@ -1,7 +1,7 @@
 import pytest # type: ignore
 import numpy as np # type: ignore
 
-from src.wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
+from wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
 
 @pytest.fixture
 def RiemannianWassersteinFlowMatchingModel():
@@ -14,11 +14,11 @@ def RiemannianWassersteinFlowMatchingModel():
 
 def test_train(RiemannianWassersteinFlowMatchingModel):
     RiemannianWassersteinFlowMatchingModel.train(training_steps = 10,
-                                                 warmup_steps = 2)
+                                                 decay_steps = 2)
     
     
 def test_flow(RiemannianWassersteinFlowMatchingModel):
     RiemannianWassersteinFlowMatchingModel.train(training_steps = 10,
-                                                 warmup_steps = 2)
+                                                 decay_steps = 2)
     RiemannianWassersteinFlowMatchingModel.generate_samples(num_samples = 10, 
                                                   timesteps = 100)

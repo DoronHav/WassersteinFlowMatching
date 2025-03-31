@@ -155,13 +155,10 @@ class BuresWassersteinFlowMatching:
                                 deterministic = True)['params']
 
         lr_sched = optax.exponential_decay(
-            learning_rate, decay_steps, 0.97, staircase = False,
+            learning_rate, decay_steps, 0.998, staircase = False,
         )
 
-        #lr_sched = learning_rate
         tx = optax.adam(lr_sched)  #
-
-
         return train_state.TrainState.create(apply_fn= model.apply, params=params, tx=tx)
 
 
@@ -245,8 +242,8 @@ class BuresWassersteinFlowMatching:
         training_steps=32000,
         batch_size=16,
         verbose=8,
-        init_lr=0.0001,
-        decay_steps=1000,
+        learning_rate = 2e-4, 
+        decay_steps = 1000,
         key=random.key(0),
     ):
         """
@@ -269,7 +266,7 @@ class BuresWassersteinFlowMatching:
 
         self.FlowMatchingModel = BuresWassersteinNN(config = self.config)
         self.state = self.create_train_state(model = self.FlowMatchingModel,
-                                             learning_rate=init_lr, 
+                                             learning_rate=learning_rate, 
                                              decay_steps = decay_steps, 
                                              key = subkey)
 
@@ -374,7 +371,7 @@ class BuresWassersteinFlowMatching:
 
         dt = 1/timesteps
 
-        for t in tqdm(jnp.linspace(1, 0, timesteps)):
+        for t in tqdm(jnp.linspace(1, dt, timesteps)):
             grad_fn = self.get_flow(generated_samples[-1][0], generated_samples[-1][1], t, generate_labels)
 
             mu_t = generated_samples[-1][0] + dt * grad_fn[0]

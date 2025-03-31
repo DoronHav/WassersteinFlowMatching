@@ -1,7 +1,7 @@
 import pytest # type: ignore
 import numpy as np # type: ignore
 
-from src.wassersteinflowmatching.bures_wasserstein import BuresWassersteinFlowMatching
+from wassersteinflowmatching.bures_wasserstein import BuresWassersteinFlowMatching
 
 @pytest.fixture
 def BuresWassersteinFlowMatchingModel():
