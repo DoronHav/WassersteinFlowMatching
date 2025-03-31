@@ -174,7 +174,7 @@ class RiemannianWassersteinFlowMatching:
 
     
 
-    def create_train_state(self, model, peak_lr, end_lr, training_steps, warmup_steps, key = random.key(0)):
+    def create_train_state(self, model, learning_rate, decay_steps, key = random.key(0)):
         """
         :meta private:
         """
@@ -205,16 +205,11 @@ class RiemannianWassersteinFlowMatching:
 
 
 
-        lr_sched = optax.warmup_cosine_decay_schedule(
-            init_value=peak_lr/100,
-            peak_value=peak_lr,
-            warmup_steps=warmup_steps,
-            decay_steps=training_steps - warmup_steps,
-            end_value=end_lr
+        lr_sched = optax.exponential_decay(
+            learning_rate, decay_steps, 0.998, staircase = False,
         )
-        
-        tx = optax.adam(lr_sched)  #
 
+        tx = optax.adam(lr_sched)  #
 
         return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
@@ -324,9 +319,8 @@ class RiemannianWassersteinFlowMatching:
         training_steps=32000,
         batch_size=16,
         verbose=8,
-        peak_lr = 3e-4, 
-        end_lr = 3e-6,
-        warmup_steps = 5000,
+        learning_rate = 2e-4, 
+        decay_steps = 1000,
         shape_sample = None,
         source_sample = None,
         saved_state = None,
@@ -354,10 +348,8 @@ class RiemannianWassersteinFlowMatching:
         if saved_state is None:
             self.state = self.create_train_state(
                 model=self.FlowMatchingModel,
-                peak_lr = peak_lr, 
-                end_lr = end_lr, 
-                training_steps = training_steps, 
-                warmup_steps = warmup_steps,
+                learning_rate = learning_rate, 
+                decay_steps = decay_steps, 
                 key=subkey
             )
         else:
