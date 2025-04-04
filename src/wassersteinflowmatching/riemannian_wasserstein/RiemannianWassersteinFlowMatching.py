@@ -20,7 +20,7 @@ from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad
 
 class RiemannianWassersteinFlowMatching:
     """
-    Initializes Wormhole model and processes input point clouds
+    Initializes WFM model and processes input point clouds
 
 
     :param point_clouds: (list of np.array) list of train-set point clouds to flow match
