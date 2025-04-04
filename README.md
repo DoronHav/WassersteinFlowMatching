@@ -6,9 +6,11 @@ This implementation is written in Python3 and relies on FLAX, JAX, & JAX-OTT.
 
 ## Examples
 
-![Car Example](examples/car.gif)
-![Chair Example](examples/chair.gif)
-![Plane Example](examples/plane.gif)
+<p align="center">
+  <img src="examples/car_cropped.gif" width="32%" />
+  <img src="examples/chair_cropped.gif" width="32%" />
+  <img src="examples/plane_cropped.gif" width="32%" />
+</p>
 
 ## Installation
 
