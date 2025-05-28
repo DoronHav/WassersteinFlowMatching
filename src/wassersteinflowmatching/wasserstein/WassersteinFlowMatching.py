@@ -41,7 +41,7 @@ class WassersteinFlowMatching:
 
 
     
-        print("Initializing WassersteinFlowMatching")
+        print("Initializing Wasserstein Flow Matching")
 
         self.config = config
 
