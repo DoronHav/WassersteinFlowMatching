@@ -49,7 +49,7 @@ class WassersteinFlowMatching:
             setattr(self.config, key, value)
         
         self.scaling = self.config.scaling
-        self.factor = self.config.factor
+        self.scaling_factor = self.config.scaling_factor
 
         self.point_clouds = self.scale_func(point_clouds)
 
@@ -157,10 +157,30 @@ class WassersteinFlowMatching:
                 self.discrete_labels = False
                 self.config.discrete_labels = False
                 self.labels = labels[None, :] if labels.ndim == 1 else labels
+            
+            self.guidance_gamma = self.config.guidance_gamma
+            self.p_uncond = self.config.p_uncond if self.guidance_gamma > 1 else 0.0
+
+            # add a print statement about label and guidance if guidance is used:
+            if(self.guidance_gamma > 1):
+                # make it clear if labels are discrete or continuous
+                if(self.discrete_labels):
+                    print(f"Using discrete labels with guidance gamma {self.guidance_gamma} and p_uncond {self.p_uncond}")
+                else:
+                    print(f"Using continuous labels with guidance gamma {self.guidance_gamma} and p_uncond {self.p_uncond}")
+            else:
+                if(self.discrete_labels):
+                    self.guidance_gamma = 1.0
+                    print("Using discrete labels without null (gamma = 1.0)")
+                else:
+                    self.guidance_gamma = 1.0
+                    print("Using continuous labels without null (gamma = 1.0)")
         else:
             self.labels = None
             self.label_dim = -1
+            self.guidance_gamma = 0
 
+            print("No labels provided, using unconditional sampling")
 
         if(self.mini_batch_ot_mode):
             self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
@@ -188,13 +208,13 @@ class WassersteinFlowMatching:
 
         if self.scaling == "min_max_total":
             if(hasattr(self, 'max_val_scale')):
-                return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
+                return [self.scaling_factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
             else:
                 self.max_val_scale = np.max([np.max(pc) for pc in point_clouds])
                 self.min_val_scale = np.min([np.min(pc) for pc in point_clouds])
-                return [self.factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
+                return [self.scaling_factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
         if self.scaling == "min_max_each":
-            point_clouds = [self.factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
+            point_clouds = [self.scaling_factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
         return point_clouds
     
 
@@ -228,15 +248,7 @@ class WassersteinFlowMatching:
                     masks = jnp.ones((attn_inputs.shape[0], attn_inputs.shape[1])),
                     deterministic = True)['params']
 
-    
 
-        # lr_sched = optax.warmup_cosine_decay_schedule(
-        #     init_value=peak_lr/100,
-        #     peak_value=peak_lr,
-        #     warmup_steps=warmup_steps,
-        #     decay_steps=training_steps - warmup_steps,
-        #     end_value=end_lr
-        # )
         
         lr_sched = optax.exponential_decay(
             learning_rate, decay_steps, 0.998, staircase = False,
@@ -291,6 +303,8 @@ class WassersteinFlowMatching:
             else:
                 noise_weights = weights_batch
 
+
+
         if self.mini_batch_ot_mode:
             # Time minibatch_ot operation
             noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights)
@@ -312,8 +326,21 @@ class WassersteinFlowMatching:
         # Time interpolation computation
         point_cloud_interpolates = noise_samples + (1 - interpolates_time[:, None, None]) * optimal_flow
 
-        subkey, key = random.split(key)
+        if(labels_batch is not None):
+            key_uncond, key = random.split(key)
+            is_uncond = random.uniform(key_uncond, (point_clouds_batch.shape[0],)) < self.p_uncond
+            is_uncond = is_uncond[:, None]  if labels_batch.ndim == 2 else is_uncond
+            null_label = -1 * jnp.ones_like(labels_batch) if self.discrete_labels else jnp.zeros_like(labels_batch)
+            labels_batch = jnp.where(is_uncond, null_label, labels_batch)
+        
+        # Debugging, print shapes of input to apply:
 
+        # print(f"point_cloud_interpolates shape: {point_cloud_interpolates.shape}")
+        # print(f"interpolates_time shape: {interpolates_time.shape}")
+        # print(f"noise_weights shape: {noise_weights.shape}")
+        # print(f"labels_batch shape: {labels_batch.shape if labels_batch is not None else 'None'}")
+        
+        subkey, key = random.split(key)
         def loss_fn(params):
             # Time loss function evaluation
             predicted_flow = state.apply_fn({"params": params},  
@@ -468,34 +495,76 @@ class WassersteinFlowMatching:
             return np.asarray([self.label_to_num[label] for label in labels])
         else:
             return labels
-
-    def generate_samples(self, size = None, num_samples = 10, timesteps = 100, generate_labels = None, init_noise = None, key = random.key(0)): 
+        
+    def generate_samples(self, 
+                        size: int = None, 
+                        num_samples: int = 10, 
+                        timesteps: int = 100, 
+                        generate_labels=None, 
+                        init_noise: jnp.ndarray = None, 
+                        key=random.key(0)):
         """
-        Generate samples from the learned flow
+        Generate samples from the learned flow using classifier-free guidance.
 
+        :param size: (int) Number of points per sample (e.g., in a point cloud). If None, inferred from data.
+        :param num_samples: (int) Number of samples to generate.
+        :param timesteps: (int) Number of integration steps for the solver.
+        :param generate_labels: The class condition(s) to generate. Can be None (will be sampled), 
+                                a single label, or a batch of labels.
+        :param gamma: (float) The scale for classifier-free guidance. 
+                    gamma = 0.0 is unconditional sampling.
+                    gamma = 1.0 is standard conditional sampling.
+        :param init_noise: (jnp.ndarray) Optional initial noise array to start the generation from.
+        :param key: JAX random key.
+        :return: A tuple of (generated_samples_trajectory, particle_weights, final_labels).
+        """
+        # --- 0. Print Generation Information ---
+        print("--- Starting Sample Generation ---")
+        print(f"  - Samples: {num_samples}")
+        print(f"  - Timesteps: {timesteps}")
+        
+        if self.labels is None:
+            print("  - Labels: Model is unconditional.")
+        else:
+            if self.discrete_labels:
+                print("  - Label Type: Discrete")
+            else:
+                print("  - Label Type: Continuous")
 
-        :param num_samples: (int) number of samples to generate (default 10)
-        :param timesteps: (int) number of timesteps to generate samples (default 100)
+            if self.guidance_gamma == 1.0:
+                print(f"  - Guidance: Standard conditional generation (gamma={self.guidance_gamma})")
+            else:
+                print(f"  - Guidance: Classifier-free guidance active (gamma={self.guidance_gamma})")
 
-        :return: generated samples
-        """ 
-        if(size is None):
+        if self.labels is not None and generate_labels is None:
+            print("  - Note: `generate_labels` not provided, will be sampled from training data.")
+        
+        print("------------------------------------")
+
+        key, subkey = random.split(key)
+
+        # --- 1. Setup Particle Sizes and Weights ---
+        if size is None:
             size = self.point_clouds.shape[1]
             particle_weights = None
         else:
             particle_weights = jnp.ones([num_samples, size])
 
-        if(self.labels is None):
+        # --- 2. Setup Conditional and Unconditional Labels ---
+        if self.labels is None:
             generate_labels = None
-            if(particle_weights is None):
-                subkey, key = random.split(key)
+            null_labels = None
+            if particle_weights is None:
                 particle_weights = random.choice(subkey, self.weights, [num_samples])
         else:
-            if(self.discrete_labels):
-                if(generate_labels is None):
-                    generate_labels = random.choice(key, self.label_dim, [num_samples], replace = True)
-                elif(isinstance(generate_labels, (str, int))):
-                    generate_labels = jnp.repeat(self.transform_labels([generate_labels]), num_samples)
+
+            if self.discrete_labels:
+                if generate_labels is None:
+                    # Sample random integer indices for classes, then convert to one-hot
+                    label_indices = random.choice(key, self.label_dim, [num_samples], replace=True)
+                    generate_labels = jax.nn.one_hot(label_indices, self.label_dim)
+                elif isinstance(generate_labels, (str, int)):
+                    generate_labels = jnp.repeat(self.transform_labels([generate_labels]), num_samples, axis=0)
                 else:
                     generate_labels = self.transform_labels(generate_labels)
                 
@@ -505,40 +574,74 @@ class WassersteinFlowMatching:
                         subkey, key = random.split(key)
                         particle_weights.append(random.choice(subkey, self.weights[self.labels == label]))
                     particle_weights = jnp.vstack(particle_weights)
-            else:
-                if(generate_labels is None):
-                    generate_labels = self.labels[np.random.choice(self.labels.shape[0], num_samples, replace = False)]
-                elif(generate_labels.ndim == 1):
+            else: # Continuous labels
+                if generate_labels is None:
+                    indices = np.random.choice(self.labels.shape[0], num_samples, replace=False)
+                    generate_labels = self.labels[indices]
+                elif generate_labels.ndim == 1:
                     generate_labels = np.tile(generate_labels[None, :], [num_samples, 1])
-
-                if(particle_weights is None):
-                    subkey, key = random.split(key)
+                
+                if particle_weights is None:
                     particle_weights = random.choice(subkey, self.weights, [num_samples])
-        subkey, key = random.split(key)
 
-        if(init_noise is not None):
-            if(init_noise.ndim == 2):
+        if(generate_labels is not None):
+            null_labels = -1*jnp.ones_like(generate_labels) if self.discrete_labels else jnp.zeros_like(generate_labels)
+
+        # --- 3. Initialize Noise ---
+        key, subkey = random.split(key)
+        if init_noise is not None:
+            if init_noise.ndim == 2:
                 init_noise = init_noise[None, :, :]
             generated_samples = [init_noise]
         else:
-            noise = self.noise_func(size = [num_samples, size, self.space_dim], 
-                                      noise_config = self.noise_config,
-                                      key = subkey)
-            if(len(noise) == 2):
+            noise = self.noise_func(size=[num_samples, size, self.space_dim], 
+                                    noise_config=self.noise_config,
+                                    key=subkey)
+            if isinstance(noise, tuple) and len(noise) == 2:
                 noise, particle_weights = noise
             generated_samples = [noise]
 
+        # --- 4. Guided Integration Loop (RK2 Midpoint Method) ---
+        
+        # print shape of xt,  particle_weights, generate_labels for debugging
 
-        dt = 1/timesteps
+        print(f"Initial sample shape: {generated_samples[0].shape}")
+        print(f"Particle weights shape: {particle_weights.shape if particle_weights is not None else 'None'}")
+        print(f"Gen labels shape: {generate_labels.shape if generate_labels is not None else 'None'}")
+        print(f"Null labels shape: {null_labels.shape if null_labels is not None else 'None'}")
 
-        for t in tqdm(jnp.linspace(1, dt, timesteps)):
+        dt = 1.0 / timesteps
+        for t_val in tqdm(jnp.linspace(1.0, dt, timesteps), desc="Generating Samples"):
             xt = generated_samples[-1]
-            vt = self.get_flow(self.params, xt, particle_weights, t, generate_labels)
-            x_mid = generated_samples[-1] + 0.5 * dt * vt
+            t_curr = jnp.full((num_samples,), t_val)
+            t_mid = jnp.full((num_samples,), t_val - 0.5 * dt)
 
-            v_mid = self.get_flow(self.params, x_mid, particle_weights, t+dt*0.5, generate_labels)
-            x_t_plus_dt = xt + dt * v_mid
-            generated_samples.append(x_t_plus_dt)
-        if(generate_labels is None):
+            if self.guidance_gamma == 0.0 or generate_labels is None:
+                vt = self.get_flow(self.params, xt, particle_weights, t_curr, null_labels)
+            elif self.guidance_gamma == 1.0:
+                vt = self.get_flow(self.params, xt, particle_weights, t_curr, generate_labels)
+            else:
+                v_c = self.get_flow(self.params, xt, particle_weights, t_curr, generate_labels)
+                v_u = self.get_flow(self.params, xt, particle_weights, t_curr, null_labels)
+                vt = v_u + self.guidance_gamma * (v_c - v_u)
+
+            x_mid = xt + 0.5 * dt * vt
+            
+            if self.guidance_gamma == 0.0 or generate_labels is None:
+                v_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, null_labels)
+            elif self.guidance_gamma == 1.0:
+                v_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, generate_labels)
+            else:
+                v_c_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, generate_labels)
+                v_u_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, null_labels)
+                v_mid = v_u_mid + self.guidance_gamma * (v_c_mid - v_u_mid)
+
+            x_t_minus_dt = xt + dt * v_mid
+            generated_samples.append(x_t_minus_dt)
+
+        # --- 5. Return Results ---
+        if generate_labels is None:
             return generated_samples, particle_weights
-        return generated_samples, particle_weights, self.transform_labels(generate_labels, inverse = True)
+        else:
+            final_labels = self.transform_labels(generate_labels, inverse=True)
+            return generated_samples, particle_weights, final_labels

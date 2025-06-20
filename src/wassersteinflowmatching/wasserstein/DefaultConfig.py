@@ -36,9 +36,11 @@ class DefaultConfig:
     minibatch_ot_eps: float = 0.01
     minibatch_ot_lse: bool = True
     noise_type: str = 'chol_normal'
-    scaling: str = 'None'
     noise_df_scale: float = 2.0
-    factor: float = 1.0
+    scaling: str = 'None'
+    scaling_factor: float = 1.0
+    guidance_gamma: float = 1.5
+    p_uncond: float = 0.1
     embedding_dim: int = 512
     num_layers: int = 6
     num_heads: int = 4
