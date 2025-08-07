@@ -94,7 +94,7 @@ class WassersteinFlowMatching:
             self.noise_func = getattr(utils_Noise, self.noise_type)
             self.matched_noise = False 
 
-            if(self.noise_type == 'chol_normal' or self.noise_type == 'meta_normal' or self.noise_type == 'student_t'):
+            if(self.noise_type == 'chol_normal' or self.noise_type == 'meta_normal'):
                 self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
                 self.cov_chol = jax.vmap(jnp.linalg.cholesky)(self.point_clouds_cov)
                 self.noise_config.cov_chol_mean = jnp.mean(self.cov_chol, axis = 0)
