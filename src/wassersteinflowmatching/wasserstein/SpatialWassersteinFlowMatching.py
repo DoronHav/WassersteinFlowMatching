@@ -135,7 +135,7 @@ class SpatialWassersteinFlowMatching:
                                                                     conditioning_obsm = conditioning_obsm)
             self.guidance_gamma = self.config.guidance_gamma
             self.p_uncond = self.config.p_uncond if self.guidance_gamma > 1 else 0.0
-            self.config = cself.onfig.replace(mini_batch_ot_mode = False)  # Disable mini-batch OT for conditional models
+            self.config = self.config.replace(mini_batch_ot_mode = False)  # Disable mini-batch OT for conditional models
             
             if self.guidance_gamma > 1:
                 print(f"Using conditioning with guidance (gamma={self.guidance_gamma}, p_uncond={self.p_uncond})")
