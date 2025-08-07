@@ -332,9 +332,10 @@ class BuresWassersteinFlowMatching:
             means = means[None, :]
             covariances = covariances[None, :]  
 
+        covariances_tril = self.vmapped_fill_triangular(covariances)
         flow_mean, flow_cov_tril = self.FlowMatchingModel.apply({"params": self.params},
                     means = means, 
-                    covariances = covariances,
+                    covariances = covariances_tril,
                     t = t * jnp.ones(covariances.shape[0]), 
                     labels = labels,
                     deterministic = True)
