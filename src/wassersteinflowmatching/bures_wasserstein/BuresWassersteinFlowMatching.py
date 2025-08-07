@@ -226,7 +226,7 @@ class BuresWassersteinFlowMatching:
                                             rngs={'dropout': subkey})
             
             
-            mean_loss, cov_loss = self.loss_func([predicted_mean_dot, predicted_cov_dot], 
+            mean_loss, cov_loss = self.loss_func([-predicted_mean_dot, -predicted_cov_dot], 
                                                 [interpolates_means_dot, interpolates_covariances_dot],
                                                 [interpolates_means, interpolates_covariances])
                             
@@ -374,7 +374,7 @@ class BuresWassersteinFlowMatching:
         for t in tqdm(jnp.linspace(1, dt, timesteps)):
             grad_fn = self.get_flow(generated_samples[-1][0], generated_samples[-1][1], t, generate_labels)
 
-            mu_t = generated_samples[-1][0] + dt * grad_fn[0]
+            mu_t = generated_samples[-1][0] - dt * grad_fn[0]
 
             if(self.gradient == 'riemannian'):
                 sigma_update =  jnp.eye(self.space_dim)[None, :, :] + dt * grad_fn[1]

@@ -294,7 +294,7 @@ class RiemannianWassersteinFlowMatching:
                                             labels = labels_batch,
                                             deterministic = False, 
                                             dropout_rng = subkey)
-            error = self.loss_func_vmap(predicted_flow, point_cloud_velocity, point_cloud_interpolates) * noise_weights
+            error = self.loss_func_vmap(predicted_flow, -point_cloud_velocity, point_cloud_interpolates) * noise_weights
             loss = jnp.mean(jnp.sum(error, axis=1))
             return loss
 
@@ -435,7 +435,7 @@ class RiemannianWassersteinFlowMatching:
                     labels = labels,
                     deterministic = True))
         
-        update = self.exponential_map_vmap(point_clouds, flow, dt)
+        update = self.exponential_map_vmap(point_clouds, flow, -dt)
         return(update)
         
 
