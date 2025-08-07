@@ -17,7 +17,7 @@ clu = "^0.0.11"
 tqdm = "^4.66.2"
 tensorflow_probability = "^0.24.0"
 pot = "^0.9.4"
-anndata = "^1.11.2"
+scanpy = "^1.11.2"
 
 [build-system]
 requires = ["poetry-core"]
