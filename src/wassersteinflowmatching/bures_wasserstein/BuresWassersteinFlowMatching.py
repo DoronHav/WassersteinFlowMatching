@@ -216,14 +216,13 @@ class BuresWassersteinFlowMatching:
         interpolates_means_dot, interpolates_covariances_dot = self.mccann_derivative_jit([means_noise, covariances_noise], [A_flow, b_flow], 1 - interpolates_time)
 
         interpolates_covariances_tril = self.vmapped_fill_triangular_inverse(interpolates_covariances)
-        interpolates_covariances_dot_tril = self.vmapped_fill_triangular_inverse(interpolates_covariances_dot)
 
         subkey, key = random.split(key)
         def loss_fn(params):   
 
             
-
-            predicted_mean_dot, predicted_cov_dot = state.apply_fn({"params": params},  
+            
+            predicted_mean_dot, predicted_cov_dot_tril = state.apply_fn({"params": params},  
                                             means = interpolates_means, 
                                             covariances = interpolates_covariances_tril,
                                             t = interpolates_time, 
@@ -231,13 +230,15 @@ class BuresWassersteinFlowMatching:
                                             deterministic = False, 
                                             rngs={'dropout': subkey})
             
-            
+            predicted_cov_dot = self.vmapped_fill_triangular(predicted_cov_dot_tril)
+            predicted_cov_dot = predicted_cov_dot + predicted_cov_dot.transpose([0, 2, 1])  # Ensure covariance is symmetric
+
             mean_loss, cov_loss = self.loss_func([-predicted_mean_dot, -predicted_cov_dot], 
-                                                [interpolates_means_dot, interpolates_covariances_dot_tril],
+                                                [interpolates_means_dot, interpolates_covariances_dot],
                                                 [interpolates_means, interpolates_covariances])
                             
             loss = jnp.mean(mean_loss) + jnp.mean(cov_loss)
-            return loss/self.space_dim
+            return loss
         
         loss, grads = jax.value_and_grad(loss_fn)(state.params)
         state = state.apply_gradients(grads=grads)
@@ -340,6 +341,8 @@ class BuresWassersteinFlowMatching:
                     labels = labels,
                     deterministic = True)
         flow_cov = self.vmapped_fill_triangular(flow_cov_tril)
+        flow_cov = flow_cov + flow_cov.transpose([0, 2, 1])  # Ensure covariance is symmetric
+
         flow_mean,flow_cov = jnp.squeeze(flow_mean), jnp.squeeze(flow_cov)
 
         return([flow_mean, flow_cov])
