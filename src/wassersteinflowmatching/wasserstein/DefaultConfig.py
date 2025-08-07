@@ -1,5 +1,5 @@
 from flax import struct # type: ignore
-
+from typing import Optional
 
 @struct.dataclass
 class DefaultConfig:
