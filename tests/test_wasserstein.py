@@ -227,7 +227,7 @@ def test_auto_find_num_iter_runs_without_mocking(unconditional_data):
     
     # 1. Create a config that will trigger the auto-finding logic
     # Note: This only works for entropic maps where Sinkhorn iterations are relevant.
-    config = DefaultConfig(num_sinkhorn_iter=-1, monge_map='entropic')
+    config = DefaultConfig(num_sinkhorn_iters=-1, monge_map='entropic')
 
     # 2. Initialize the model and time the process
     model = WassersteinFlowMatching(
