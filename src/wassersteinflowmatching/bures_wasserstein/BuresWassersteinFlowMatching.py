@@ -338,7 +338,7 @@ class BuresWassersteinFlowMatching:
                     t = t * jnp.ones(covariances.shape[0]), 
                     labels = labels,
                     deterministic = True)
-        flow_cov = self.vmapped_fill_triangular(flow_cov)
+        flow_cov = self.vmapped_fill_triangular(flow_cov_tril)
         flow_mean,flow_cov = jnp.squeeze(flow_mean), jnp.squeeze(flow_cov)
 
         return([flow_mean, flow_cov])
