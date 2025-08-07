@@ -13,7 +13,7 @@ from flax.training import train_state # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_Noise as utils_Noise # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_Pointclouds as utils_Pointclouds # type: ignore
-from wassersteinflowmatching.bures_wasserstein._utils_Neural import BuresWassersteinNN # type: ignore
+from wassersteinflowmatching.bures_wasserstein._utils_Neural import BuresWassersteinNN, fill_triangular, fill_triangular_inverse # type: ignore
 from wassersteinflowmatching.bures_wasserstein.DefaultConfig import DefaultConfig # type: ignore
 
 
@@ -215,11 +215,17 @@ class BuresWassersteinFlowMatching:
         interpolates_means, interpolates_covariances  = self.mccann_interpolation_jit([means_noise, covariances_noise], [A_flow, b_flow], 1 - interpolates_time)
         interpolates_means_dot, interpolates_covariances_dot = self.mccann_derivative_jit([means_noise, covariances_noise], [A_flow, b_flow], 1 - interpolates_time)
 
+        interpolates_covariances_tril = self.vmapped_fill_triangular_inverse(interpolates_covariances)
+        interpolates_covariances_dot_tril = self.vmapped_fill_triangular_inverse(interpolates_covariances_dot)
+
         subkey, key = random.split(key)
-        def loss_fn(params):       
+        def loss_fn(params):   
+
+            
+
             predicted_mean_dot, predicted_cov_dot = state.apply_fn({"params": params},  
                                             means = interpolates_means, 
-                                            covariances = interpolates_covariances,
+                                            covariances = interpolates_covariances_tril,
                                             t = interpolates_time, 
                                             labels = labels_batch,
                                             deterministic = False, 
@@ -227,7 +233,7 @@ class BuresWassersteinFlowMatching:
             
             
             mean_loss, cov_loss = self.loss_func([-predicted_mean_dot, -predicted_cov_dot], 
-                                                [interpolates_means_dot, interpolates_covariances_dot],
+                                                [interpolates_means_dot, interpolates_covariances_dot_tril],
                                                 [interpolates_means, interpolates_covariances])
                             
             loss = jnp.mean(mean_loss) + jnp.mean(cov_loss)
@@ -265,6 +271,9 @@ class BuresWassersteinFlowMatching:
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = BuresWassersteinNN(config = self.config)
+        self.vmapped_fill_triangular = jax.jit(jax.vmap(fill_triangular, (0,), 0))
+        self.vmapped_fill_triangular_inverse = jax.jit(jax.vmap(fill_triangular_inverse, (0,), 0))
+
         self.state = self.create_train_state(model = self.FlowMatchingModel,
                                              learning_rate=learning_rate, 
                                              decay_steps = decay_steps, 
@@ -323,12 +332,13 @@ class BuresWassersteinFlowMatching:
             means = means[None, :]
             covariances = covariances[None, :]  
 
-        flow_mean, flow_cov = self.FlowMatchingModel.apply({"params": self.params},
+        flow_mean, flow_cov_tril = self.FlowMatchingModel.apply({"params": self.params},
                     means = means, 
                     covariances = covariances,
                     t = t * jnp.ones(covariances.shape[0]), 
                     labels = labels,
                     deterministic = True)
+        flow_cov = self.vmapped_fill_triangular(flow_cov)
         flow_mean,flow_cov = jnp.squeeze(flow_mean), jnp.squeeze(flow_cov)
 
         return([flow_mean, flow_cov])

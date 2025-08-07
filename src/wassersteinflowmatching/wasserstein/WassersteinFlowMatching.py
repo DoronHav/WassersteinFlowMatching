@@ -106,7 +106,7 @@ class WassersteinFlowMatching:
         self.monge_map = self.config.monge_map
         self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
 
-        if(self.num_sinkhorn_iter == -1):
+        if(self.num_sinkhorn_iters == -1):
             print("Automatically setting num_sinkhorn_iter by testing OT function")
 
             subkey_noise, key = random.split(key)
@@ -115,14 +115,14 @@ class WassersteinFlowMatching:
                                        key = subkey_noise)
             noise_weights = jnp.ones([noise_point_clouds.shape[0], noise_point_clouds.shape[1]]) / noise_point_clouds.shape[1]
 
-            self.num_sinkhorn_iter = utils_OT.auto_find_num_iter(point_clouds = self.point_clouds, 
+            self.num_sinkhorn_iters = utils_OT.auto_find_num_iter(point_clouds = self.point_clouds, 
                                                                  weights = self.weights,
                                                                  noise_point_clouds = noise_point_clouds,
                                                                 noise_weights = noise_weights,
                                                                  eps = self.config.wasserstein_eps, lse_mode = self.config.wasserstein_lse)
-            print("Setting num_sinkhorn_iter to", self.num_sinkhorn_iter)
+            print("Setting num_sinkhorn_iter to", self.num_sinkhorn_iters)
         else:
-            print("Using num_sinkhorn_iter =", self.num_sinkhorn_iter) 
+            print("Using num_sinkhorn_iter =", self.num_sinkhorn_iters) 
 
         if(self.monge_map == 'entropic'):
             print(f"Using entropic map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")

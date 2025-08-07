@@ -131,15 +131,13 @@ class InputMeanCovarianceNN(nn.Module):
     config: DefaultConfig
 
     @nn.compact
-    def __call__(self, means, covariances, t,  labels = None, deterministic = True):
+    def __call__(self, means, cov_tril, t,  labels = None, deterministic = True):
         config = self.config
 
         embedding_dim = config.embedding_dim
         num_layers = config.num_layers
 
         freqs = jnp.arange(embedding_dim//2) 
-
-        cov_tril = vmapped_fill_triangular_inverse(covariances)
 
         means_emb = nn.Dense(features = embedding_dim)(means)
         covariances_emb = nn.Dense(features = embedding_dim)(cov_tril)
@@ -185,7 +183,7 @@ class BuresWassersteinNN(nn.Module):
                         bias_init=nn.initializers.zeros)(mean_dot_emb)
 
 
-            tril_vec = nn.Dense((space_dim * (space_dim + 1)) // 2,
+            covariance_dot_tril = nn.Dense((space_dim * (space_dim + 1)) // 2,
                                 kernel_init=nn.initializers.variance_scaling(1e-3, mode='fan_in', distribution='truncated_normal'), 
                                 bias_init=nn.initializers.zeros)(sigma_dot_emb)
 
@@ -196,11 +194,8 @@ class BuresWassersteinNN(nn.Module):
 
 
             mean_dot = nn.Dense(space_dim)(dot_emb)
-            tril_vec = nn.Dense((space_dim * (space_dim + 1)) // 2)(dot_emb)
+            covariance_dot_tril = nn.Dense((space_dim * (space_dim + 1)) // 2)(dot_emb)
 
-        lower_triangular = vmapped_fill_triangular(tril_vec)
-        covariance_dot = lower_triangular + jnp.triu(lower_triangular.transpose([0,2,1]), k=1)
-
-        return mean_dot, covariance_dot
+        return mean_dot, covariance_dot_tril
 
 

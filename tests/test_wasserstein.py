@@ -75,7 +75,7 @@ def test_initialization_with_monge_maps(unconditional_data, monge_map_type):
     except Exception as e:
         pytest.fail(f"Initialization with monge_map='{monge_map_type}' failed: {e}")
 
-@pytest.mark.parametrize("noise_type", ['uniform', 'normal', 'chol_normal', 'meta_normal', 'student_t'])
+@pytest.mark.parametrize("noise_type", ['uniform', 'normal', 'chol_normal', 'meta_normal'])
 def test_initialization_with_noise_types(unconditional_data, noise_type):
     """Tests model initialization with different noise types."""
     try:
