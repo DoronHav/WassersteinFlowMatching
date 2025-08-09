@@ -6,17 +6,14 @@ authors = ["Doron Haviv"]
 license = "MIT"
 readme = "README.md"
 
-
-
 [tool.poetry.dependencies]
 python = "^3.9"
-flax = "^0.10.4"
-ott-jax = "^0.4.7"
+flax = "^0.10.6"
+ott-jax = "^0.4.9"
 optax = "^0.2.4"
-clu = "^0.0.11"
 tqdm = "^4.66.2"
-tensorflow_probability = "^0.24.0"
 pot = "^0.9.4"
+scanpy = "^1.11.2"
 
 [build-system]
 requires = ["poetry-core"]

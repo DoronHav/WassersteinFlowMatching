@@ -1,7 +1,11 @@
 import pytest # type: ignore
 import numpy as np # type: ignore
+import jax.numpy as jnp # type: ignore
+import jax # type: ignore 
 
 from wassersteinflowmatching.bures_wasserstein import BuresWassersteinFlowMatching
+from wassersteinflowmatching.bures_wasserstein._utils_Neural import fill_triangular, fill_triangular_inverse
+
 
 @pytest.fixture
 def BuresWassersteinFlowMatchingModel():

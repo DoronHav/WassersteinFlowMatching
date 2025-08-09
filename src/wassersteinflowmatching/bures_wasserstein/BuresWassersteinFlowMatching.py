@@ -13,7 +13,7 @@ from flax.training import train_state # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_Noise as utils_Noise # type: ignore
 import wassersteinflowmatching.bures_wasserstein.utils_Pointclouds as utils_Pointclouds # type: ignore
-from wassersteinflowmatching.bures_wasserstein._utils_Neural import BuresWassersteinNN # type: ignore
+from wassersteinflowmatching.bures_wasserstein._utils_Neural import BuresWassersteinNN, fill_triangular, fill_triangular_inverse # type: ignore
 from wassersteinflowmatching.bures_wasserstein.DefaultConfig import DefaultConfig # type: ignore
 
 
@@ -137,20 +137,20 @@ class BuresWassersteinFlowMatching:
         means_noise, covariances_noise = self.noise_func(batch_size = 10, 
                                                          noise_config = self.noise_config,
                                                          key = subkey)
-        
+        covariances_noise_tril = self.vmapped_fill_triangular_inverse(covariances_noise)
         subkey, key = random.split(key)
         
         if(self.labels is not None):
             params = model.init(rngs={"params": subkey}, 
                                 means = means_noise, 
-                                covariances = covariances_noise,
+                                covariances = covariances_noise_tril,
                                 t = jnp.ones((means_noise.shape[0])), 
                                 labels =  jnp.ones((means_noise.shape[0])),
                                 deterministic = True)['params']
         else:
             params = model.init(rngs={"params": subkey}, 
                                 means = means_noise, 
-                                covariances = covariances_noise,
+                                covariances = covariances_noise_tril,
                                 t = jnp.ones((means_noise.shape[0])), 
                                 deterministic = True)['params']
 
@@ -215,23 +215,30 @@ class BuresWassersteinFlowMatching:
         interpolates_means, interpolates_covariances  = self.mccann_interpolation_jit([means_noise, covariances_noise], [A_flow, b_flow], 1 - interpolates_time)
         interpolates_means_dot, interpolates_covariances_dot = self.mccann_derivative_jit([means_noise, covariances_noise], [A_flow, b_flow], 1 - interpolates_time)
 
+        interpolates_covariances_tril = self.vmapped_fill_triangular_inverse(interpolates_covariances)
+
         subkey, key = random.split(key)
-        def loss_fn(params):       
-            predicted_mean_dot, predicted_cov_dot = state.apply_fn({"params": params},  
+        def loss_fn(params):   
+
+            
+            
+            predicted_mean_dot, predicted_cov_dot_tril = state.apply_fn({"params": params},  
                                             means = interpolates_means, 
-                                            covariances = interpolates_covariances,
+                                            covariances = interpolates_covariances_tril,
                                             t = interpolates_time, 
                                             labels = labels_batch,
                                             deterministic = False, 
                                             rngs={'dropout': subkey})
             
-            
-            mean_loss, cov_loss = self.loss_func([predicted_mean_dot, predicted_cov_dot], 
+            predicted_cov_dot = self.vmapped_fill_triangular(predicted_cov_dot_tril)
+            predicted_cov_dot = predicted_cov_dot + predicted_cov_dot.transpose([0, 2, 1])  # Ensure covariance is symmetric
+
+            mean_loss, cov_loss = self.loss_func([-predicted_mean_dot, -predicted_cov_dot], 
                                                 [interpolates_means_dot, interpolates_covariances_dot],
                                                 [interpolates_means, interpolates_covariances])
                             
             loss = jnp.mean(mean_loss) + jnp.mean(cov_loss)
-            return loss/self.space_dim
+            return loss
         
         loss, grads = jax.value_and_grad(loss_fn)(state.params)
         state = state.apply_gradients(grads=grads)
@@ -265,6 +272,12 @@ class BuresWassersteinFlowMatching:
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = BuresWassersteinNN(config = self.config)
+
+
+        self.vmapped_fill_triangular = jax.jit(jax.vmap(partial(fill_triangular, d=self.space_dim), (0,), 0))
+        self.vmapped_fill_triangular_inverse = jax.jit(jax.vmap(fill_triangular_inverse, (0,), 0))
+        self.f = jax.jit(jax.vmap(fill_triangular_inverse, (0,), 0))
+
         self.state = self.create_train_state(model = self.FlowMatchingModel,
                                              learning_rate=learning_rate, 
                                              decay_steps = decay_steps, 
@@ -323,12 +336,16 @@ class BuresWassersteinFlowMatching:
             means = means[None, :]
             covariances = covariances[None, :]  
 
-        flow_mean, flow_cov = self.FlowMatchingModel.apply({"params": self.params},
+        covariances_tril = self.vmapped_fill_triangular_inverse(covariances)
+        flow_mean, flow_cov_tril = self.FlowMatchingModel.apply({"params": self.params},
                     means = means, 
-                    covariances = covariances,
+                    covariances = covariances_tril,
                     t = t * jnp.ones(covariances.shape[0]), 
                     labels = labels,
                     deterministic = True)
+        flow_cov = self.vmapped_fill_triangular(flow_cov_tril)
+        flow_cov = flow_cov + flow_cov.transpose([0, 2, 1])  # Ensure covariance is symmetric
+
         flow_mean,flow_cov = jnp.squeeze(flow_mean), jnp.squeeze(flow_cov)
 
         return([flow_mean, flow_cov])
@@ -374,7 +391,7 @@ class BuresWassersteinFlowMatching:
         for t in tqdm(jnp.linspace(1, dt, timesteps)):
             grad_fn = self.get_flow(generated_samples[-1][0], generated_samples[-1][1], t, generate_labels)
 
-            mu_t = generated_samples[-1][0] + dt * grad_fn[0]
+            mu_t = generated_samples[-1][0] - dt * grad_fn[0]
 
             if(self.gradient == 'riemannian'):
                 sigma_update =  jnp.eye(self.space_dim)[None, :, :] + dt * grad_fn[1]

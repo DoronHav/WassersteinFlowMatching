@@ -7,6 +7,8 @@ from jax import random # type: ignore
 import ot # type: ignore
 import numpy as np # type: ignore
 
+from tqdm import tqdm
+
 def rounded_matching(M):
     """
     Convert a soft assignment matrix M to a hard assignment vector
@@ -145,6 +147,50 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
         min_iterations = 200,
         max_iterations = 200)
     return(ot_solve.reg_ot_cost)
+
+def unbalanced_ot_distance(pc_x, pc_y, eps = 0.01, tau_a = 1.0, tau_b = 1.0, lse_mode = False, num_iteration = 200): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    ot_solve_xy = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        a = w_x,
+        b = w_y,
+        tau_a = tau_a,
+        tau_b = tau_b,
+        lse_mode = lse_mode,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
+
+    
+    #map_ind = rounded_matching(ot_solve_xy.matrix)
+    map_ind = jnp.argmax(ot_solve_xy.matrix, axis = 1)
+    pc_y_reord = jnp.take(pc_y, map_ind, axis = 0)
+    ot_dist = jnp.sum(jnp.sum((pc_x - pc_y_reord)**2, axis = 1) * w_x)
+    return(ot_dist)
+
+def s2_distance(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+
+    ot_solve_xy = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
+        lse_mode = lse_mode,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
+
+    ot_solve_xx = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_x, cost_fn=None, epsilon = eps),
+        lse_mode = lse_mode,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
+    
+    ot_solve_yy = linear.solve(
+        ott.geometry.pointcloud.PointCloud(pc_x, pc_x, cost_fn=None, epsilon = eps),
+        lse_mode = lse_mode,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
+    
+    s2_distance = ot_solve_xy.reg_ot_cost - 0.5 * (ot_solve_xx.reg_ot_cost + ot_solve_yy.reg_ot_cost)
+    return(s2_distance)
 
 
 def euclidean_distance(pc_x, pc_y): 
@@ -308,4 +354,94 @@ def transport_plan_euclidean(pc_x, pc_y):
 
     delta = pc_y - pc_x
     return(delta, 0)
+
+
+
+def auto_find_num_iter(point_clouds, weights, eps, lse_mode, num_calc=100, sample_size=2048, noise_point_clouds=None, noise_weights=None):
+    """
+    Find the minimum number of iterations for which at least 80% of OT calculations converge.
+
+    It tests a predefined list of iteration counts on randomly sampled pairs of point clouds.
+    If noise_point_clouds are provided, it compares clouds from the original set against the noise set.
+    For performance, if a point cloud contains more points than `sample_size`, a random subset
+    is used for the calculation.
+
+    Args:
+        point_clouds (list): A list of point cloud coordinate arrays.
+        weights (list): A list of corresponding weight arrays for each point cloud.
+        eps (float): Coefficient of entropic regularization.
+        lse_mode (bool): Whether to use log-sum-exp mode.
+        num_calc (int): The number of random pairs to test for each iteration count.
+        sample_size (int): The number of points to sample from larger point clouds.
+        noise_point_clouds (list, optional): A list of noise point cloud arrays. Defaults to None.
+        noise_weights (list, optional): A list of corresponding weights for noise point clouds. Defaults to None.
+
+    Returns:
+        int: The recommended number of iterations.
+    """
+    
+    num_iter_test = [100, 200, 500, 1000, 5000]
+    num_clouds = len(point_clouds)
+    num_noise_clouds = len(noise_point_clouds) if noise_point_clouds is not None else 0
+
+    for n_iter in num_iter_test:
+        converged_count = 0
+        for _ in tqdm(range(num_calc), desc=f"Testing Entropic OT convergence with {n_iter} iterations"):
+            
+            # --- MODIFIED LOGIC: Select point clouds based on noise arguments ---
+            if noise_point_clouds is not None and noise_weights is not None:
+                # Select one from original clouds and one from noise clouds
+                idx1 = np.random.randint(0, num_clouds)
+                idx2 = np.random.randint(0, num_noise_clouds)
+                x_points, a_weights = point_clouds[idx1], weights[idx1]
+                y_points, b_weights = noise_point_clouds[idx2], noise_weights[idx2]
+            else:
+                # Original behavior: randomly select two different point clouds for comparison
+                idx1, idx2 = np.random.choice(num_clouds, 2, replace=False)
+                x_points, a_weights = point_clouds[idx1], weights[idx1]
+                y_points, b_weights = point_clouds[idx2], weights[idx2]
+            # --------------------------------------------------------------------
+
+            # --- OPTIMIZATION: Sample large point clouds to speed up calculation ---
+            if len(x_points) > sample_size:
+                indices_x = np.random.choice(len(x_points), sample_size, replace=False)
+                x_points = x_points[indices_x]
+                a_weights = a_weights[indices_x]
+            
+            if len(y_points) > sample_size:
+                indices_y = np.random.choice(len(y_points), sample_size, replace=False)
+                y_points = y_points[indices_y]
+                b_weights = b_weights[indices_y]
+            # --------------------------------------------------------------------
+            
+            # Replicate solver logic to access the convergence status
+            # Note: cost_fn=None uses the default Squared Euclidean distance.
+            geom = ott.geometry.pointcloud.PointCloud(x_points, y_points, epsilon=eps, scale_cost='max_cost')
+            ot_solve = linear.solve(
+                geom,
+                a=a_weights,
+                b=b_weights,
+                min_iterations=n_iter,
+                max_iterations=n_iter,
+                lse_mode=lse_mode
+            )
+
+            if ot_solve and ot_solve.converged:
+                converged_count += 1
+
+        # Check if the convergence rate is 80% or higher
+        convergence_rate = round((converged_count / num_calc) * 100)
+        print(f"Convergence rate with {n_iter} iterations: {convergence_rate}%")
+
+        if (converged_count / num_calc) >= 0.8:
+            print(f"INFO: Found sufficient convergence at {n_iter} iterations.")
+            return n_iter
+
+    # If no value meets the criterion, return the highest tested number of iterations
+    print("WARNING: Convergence rate did not reach 80% for any tested iteration count. Returning the max value.")
+    return num_iter_test[-1]
+
+
+
+
 

@@ -1,12 +1,23 @@
 import jax # type: ignore
 from jax import random   # type: ignore
 import jax.numpy as jnp # type: ignore
+from jax.scipy.stats import norm, multivariate_normal  # type: ignore
+
+from wassersteinflowmatching.wasserstein.utils_OT import s2_distance
 
 def project_psd(A):
     """Project a matrix onto the positive semidefinite cone."""
     eigvals, eigvecs = jnp.linalg.eigh(A)
     eigvals = jnp.maximum(eigvals, 1e-6)
     return jnp.dot(eigvecs, jnp.dot(jnp.diag(eigvals), eigvecs.T))
+
+# def sample_gaussian_points(key, cov, n):
+#     """Samples n points from a multivariate Gaussian."""
+#     dim = cov.shape[0]
+#     # Use cholesky decomposition for stable sampling
+#     chol = jnp.linalg.cholesky(cov + 1e-6 * jnp.eye(dim)) # Add jitter for stability
+#     return jnp.dot(random.normal(key, (n, dim)), chol.T)
+
 
 def sample_wishart(key, df, V_chol, K):
     """ Sample K covariance matrices from a Wishart distribution.
@@ -28,7 +39,7 @@ def sample_wishart(key, df, V_chol, K):
         L = Z @ V_chol.T
         return L.T @ L
     
-    cov_matrices = jax.vmap(sample_single_wishart)(keys)
+    cov_matrices = jax.vmap(sample_single_wishart)(keys)/df
     return cov_matrices
 
 def sample_gaussian_points(key, cov_matrix, n):
@@ -105,13 +116,13 @@ def meta_normal(size, noise_config, key):
 
     minval = noise_config.minval
     maxval = noise_config.maxval
-    covariance_barycenter_chol = noise_config.covariance_barycenter_chol
+    covariance_barycenter_chol = noise_config.cov_chol_mean
     noise_df_scale = noise_config.noise_df_scale
 
     K, n, d = size
     df = int(d*noise_df_scale)
     wishart_key, gaussian_key = random.split(key)
-    cov_matrices = sample_wishart(wishart_key, df, covariance_barycenter_chol, K) / df
+    cov_matrices = sample_wishart(wishart_key, df, covariance_barycenter_chol, K) * noise_df_scale
     
     # Sample n points from Gaussian for each covariance matrix
     keys = random.split(gaussian_key, K)
@@ -136,14 +147,14 @@ def chol_normal(size, noise_config, key):
     """
     # Sample K covariance matrices
 
-    minval = noise_config.minval
-    maxval = noise_config.maxval
+    # minval = noise_config.minval
+    # maxval = noise_config.maxval
     K, n, d = size
     chol_key, gaussian_key = random.split(key, 2)
     
     # Get the mean and std of Cholesky factors
     chol_mean = noise_config.cov_chol_mean
-    chol_std = noise_config.cov_chol_std * noise_config.noise_df_scale
+    chol_std = noise_config.cov_chol_std 
     
     # Ensure we're only modifying the lower triangular part
     lower_mask = jnp.tril(jnp.ones((d, d)))
@@ -164,8 +175,8 @@ def chol_normal(size, noise_config, key):
     
     # Sample n points from Gaussian for each covariance matrix
     keys = random.split(gaussian_key, K)
-    points = jax.vmap(lambda key, cov: sample_gaussian_points_chol(key, cov, n))(keys, cov_matrices_chol)
-    points = jnp.clip(points, minval, maxval)
+    points = jax.vmap(lambda key, cov: sample_gaussian_points_chol(key, cov, n))(keys, cov_matrices_chol) * noise_config.noise_df_scale
+    # points = jnp.clip(points, minval, maxval)
     return points
 
 def random_pointclouds(size, noise_config, key):
@@ -184,4 +195,129 @@ def random_pointclouds(size, noise_config, key):
     sampled_weights = jnp.take(noise_weights, noise_inds, axis=0)
 
     return sampled_pointclouds, sampled_weights
+
+
+
+def norm_logpdf(x, loc, scale):
+    """
+    A manual, JIT-friendly implementation of the univariate normal log PDF.
+    `loc` is the mean (mu), `scale` is the standard deviation (sigma).
+    """
+    log_unnormalized = -0.5 * jnp.square((x - loc) / scale)
+    log_normalization = 0.5 * jnp.log(2. * jnp.pi) + jnp.log(scale)
+    return log_unnormalized - log_normalization
+
+
+
+def multivariate_normal_logpdf(x, mean, cov):
+    """
+    A manual, JIT-friendly implementation of the multivariate normal log PDF.
+    `x` is a batch of data points with shape (num_points, num_dims).
+    `mean` is the mean vector with shape (num_dims,).
+    `cov` is the covariance matrix with shape (num_dims, num_dims).
+    """
+    num_dims = x.shape[-1]
+    
+    # Calculate the log-determinant of the covariance matrix
+    sign, log_det_cov = jnp.linalg.slogdet(cov)
+    
+    # Calculate the Mahalanobis distance term for each point in the batch
+    # This term is (x - mean)^T * inv(cov) * (x - mean)
+    # We solve this efficiently using jnp.linalg.solve
+    x_minus_mean = x - mean
+    # We vmap the solver over the batch of points in x
+    mahalanobis_sq = jax.vmap(lambda b: b.T @ jnp.linalg.solve(cov, b))(x_minus_mean)
+
+    # Combine the terms for the final log probability for each point
+    log_pdf_batch = -0.5 * (num_dims * jnp.log(2. * jnp.pi) + log_det_cov + mahalanobis_sq)
+    
+    return log_pdf_batch
+
+@staticmethod
+def _log_pdf_chol_normal(z, noise_config, with_wasserstein=False, key=random.PRNGKey(0)):
+
+    from wassersteinflowmatching.wasserstein.utils_OT import s2_distance
+    """
+    Calculates the log probability of a point cloud `z` under the meta-normal prior.
+    This uses the approximation: log p(z) ≈ log p(cov(z)|DiagGaussian) + log p(z|N(0, cov(z)))
+    The second term is approximated by the negative Wasserstein distance.
+
+    Args:
+        z: The input point cloud. Shape: (num_points, num_dims).
+        noise_config: A configuration object with `cov_mean` and `cov_std` attributes.
+        with_wasserstein: If True, calculates and subtracts the Wasserstein distance.
+        key: JAX random key for sampling.
+
+    Returns:
+        The calculated log probability.
+    """
+    # 1. Calculate the empirical covariance of the point cloud z
+    empirical_cov = jnp.cov(z, rowvar=False)
+    num_dims = z.shape[-1]
+
+    # 2. Calculate the log probability of the empirical covariance under a diagonal Gaussian prior.
+    # This corresponds to the first term in the approximation: log p(cov(z)|DiagGaussian)
+    log_pdf_cov = norm_logpdf(
+        empirical_cov.flatten(),
+        loc=noise_config.cov_mean.flatten(),
+        scale=noise_config.cov_std.flatten()
+    ).sum()
+
+    if with_wasserstein:
+        # --- Wasserstein Distance Calculation ---
+        # This part approximates the second term: log p(z|N(0, cov(z))).
+        cov_no_grad = jax.lax.stop_gradient(empirical_cov)
+        wasserstein_key, _ = random.split(key)
+        num_points = z.shape[0]
+        
+        chol = jnp.linalg.cholesky(cov_no_grad + 1e-6 * jnp.eye(num_dims))
+        standard_normal_samples = random.normal(wasserstein_key, shape=(num_dims, num_points))
+        
+        wasserstein_points = (chol @ standard_normal_samples).T
+        w2_dist = s2_distance(z, wasserstein_points, 0.01, True, 200) 
+
+        total_log_pdf = log_pdf_cov - w2_dist * z.shape[0]**2
+        return total_log_pdf, w2_dist
+
+    return log_pdf_cov, 0
+
+@staticmethod
+def _log_pdf_meta_normal(z, noise_config):
+
+    
+    """
+    Calculates the log probability of a point cloud `z` under the meta-normal prior.
+    This uses the approximation: log p(z) ≈ log p(cov(z)|DiagGaussian) + log p(z|N(0, cov(z)))
+    """
+    # 1. Calculate the empirical covariance of the point cloud z
+    empirical_cov = jnp.cov(z, rowvar=False)
+    d = z.shape[1]
+
+    # 2. Calculate the parameters for the diagonal Gaussian approximation of the Wishart prior
+    df = int(d * noise_config.noise_df_scale)
+    V_chol = noise_config.cov_chol_mean
+    V = V_chol @ V_chol.T
+    scale_factor = noise_config.noise_df_scale
+
+    # Mean of the generated covariance matrices C = W/df * scale_factor, where W ~ Wishart(df, V)
+    mean_cov = V * scale_factor
+
+    # Variance of the elements of the generated covariance matrices
+    # Var(C_ij) = (scale_factor^2 / df) * (V_ij^2 + V_ii * V_jj)
+    V_ii = jnp.diag(V)
+    var_cov = (scale_factor**2 / df) * (V**2 + V_ii[:, None] * V_ii[None, :])
+    
+    # Log probability of the empirical covariance under the diagonal Gaussian approximation
+    log_pdf_cov = norm_logpdf(
+        empirical_cov.flatten(), 
+        loc=mean_cov.flatten(), 
+        scale=jnp.sqrt(var_cov.flatten())
+    ).sum()
+    
+    # 3. Calculate the log probability of the points under a Gaussian with that empirical covariance
+    # We assume a zero mean for the Gaussian.
+    log_pdf_points = multivariate_normal_logpdf(z, mean=jnp.zeros(d), cov=empirical_cov).mean()
+    
+    return log_pdf_cov #+ log_pdf_points
+
 

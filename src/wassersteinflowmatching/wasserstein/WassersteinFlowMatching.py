@@ -5,9 +5,10 @@ import jax # type: ignore
 import jax.numpy as jnp # type: ignore
 import numpy as np  # type: ignore
 import optax # type: ignore
-from jax import jit, random# type: ignore
+from jax import jit, random, lax# type: ignore
 from tqdm import trange, tqdm # type: ignore
 from flax.training import train_state # type: ignore
+from typing import Optional
 import pickle # type: ignore
 
 import wassersteinflowmatching.wasserstein.utils_OT as utils_OT # type: ignore
@@ -36,6 +37,7 @@ class WassersteinFlowMatching:
         noise_point_clouds = None,
         matched_noise = False,
         config = DefaultConfig,
+        key = random.key(0),
         **kwargs,
     ):
 
@@ -45,8 +47,8 @@ class WassersteinFlowMatching:
 
         self.config = config
 
-        for key, value in kwargs.items():
-            setattr(self.config, key, value)
+        if kwargs:
+            config = config.replace(**kwargs)
         
         self.scaling = self.config.scaling
         self.scaling_factor = self.config.scaling_factor
@@ -63,8 +65,64 @@ class WassersteinFlowMatching:
         )
 
         self.space_dim = self.point_clouds.shape[-1]
+
+        self.noise_config = types.SimpleNamespace()
+        if(noise_point_clouds is not None):
+            self.noise_point_clouds = self.scale_func(noise_point_clouds)
+            self.noise_weights = [
+                np.ones(pc.shape[0]) / pc.shape[0] for pc in self.noise_point_clouds
+            ]
+            self.noise_point_clouds, self.noise_weights = pad_pointclouds(
+                self.noise_point_clouds, self.noise_weights
+            )
+
+            self.noise_config.noise_point_clouds = self.noise_point_clouds
+            self.noise_config.noise_weights = self.noise_weights
+            self.matched_noise = matched_noise
+            self.noise_func = utils_Noise.random_pointclouds
+            self.config.mini_batch_ot_mode = not self.matched_noise
+
+        else:
+
+            self.min_val = self.point_clouds[self.weights > 0].min()
+            self.max_val = self.point_clouds[self.weights > 0].max()
+
+            self.noise_config.maxval = self.point_clouds[self.weights > 0].max()
+            self.noise_config.minval = self.point_clouds[self.weights > 0].min()
+
+            self.noise_type = self.config.noise_type
+            self.noise_func = getattr(utils_Noise, self.noise_type)
+            self.matched_noise = False 
+
+            if(self.noise_type == 'chol_normal' or self.noise_type == 'meta_normal'):
+                self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
+                self.cov_chol = jax.vmap(jnp.linalg.cholesky)(self.point_clouds_cov)
+                self.noise_config.cov_chol_mean = jnp.mean(self.cov_chol, axis = 0)
+                self.noise_config.cov_chol_std = jnp.std(self.cov_chol, axis = 0)
+                self.noise_config.cov_mean = np.mean(self.point_clouds_cov, axis=0)
+                self.noise_config.cov_std = np.std(self.point_clouds_cov, axis=0)
+                self.noise_config.noise_df_scale = self.config.noise_df_scale
+
         self.monge_map = self.config.monge_map
         self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
+
+        if(self.num_sinkhorn_iters == -1):
+            print("Automatically setting num_sinkhorn_iter by testing OT function")
+
+            subkey_noise, key = random.split(key)
+            noise_point_clouds = self.noise_func(size = [256, min(self.point_clouds[0].shape[0], 2048), self.space_dim], 
+                                       noise_config = self.noise_config,
+                                       key = subkey_noise)
+            noise_weights = jnp.ones([noise_point_clouds.shape[0], noise_point_clouds.shape[1]]) / noise_point_clouds.shape[1]
+
+            self.num_sinkhorn_iters = utils_OT.auto_find_num_iter(point_clouds = self.point_clouds, 
+                                                                 weights = self.weights,
+                                                                 noise_point_clouds = noise_point_clouds,
+                                                                noise_weights = noise_weights,
+                                                                 eps = self.config.wasserstein_eps, lse_mode = self.config.wasserstein_lse)
+            print("Setting num_sinkhorn_iter to", self.num_sinkhorn_iters)
+        else:
+            print("Using num_sinkhorn_iter =", self.num_sinkhorn_iters) 
 
         if(self.monge_map == 'entropic'):
             print(f"Using entropic map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
@@ -99,46 +157,6 @@ class WassersteinFlowMatching:
                     num_iteration = self.config.num_sinkhorn_iters),
                     (0, 0), 0)
 
-        self.noise_config = types.SimpleNamespace()
-        if(noise_point_clouds is not None):
-            self.noise_point_clouds = self.scale_func(noise_point_clouds)
-            self.noise_weights = [
-                np.ones(pc.shape[0]) / pc.shape[0] for pc in self.noise_point_clouds
-            ]
-            self.noise_point_clouds, self.noise_weights = pad_pointclouds(
-                self.noise_point_clouds, self.noise_weights
-            )
-
-            self.noise_config.noise_point_clouds = self.noise_point_clouds
-            self.noise_config.noise_weights = self.noise_weights
-            self.matched_noise = matched_noise
-            self.noise_func = utils_Noise.random_pointclouds
-            self.config.mini_batch_ot_mode = not self.matched_noise
-
-        else:
-
-            self.min_val = self.point_clouds[self.weights > 0].min()
-            self.max_val = self.point_clouds[self.weights > 0].max()
-
-            self.noise_config.maxval = self.point_clouds[self.weights > 0].max()
-            self.noise_config.minval = self.point_clouds[self.weights > 0].min()
-
-            self.noise_type = self.config.noise_type
-            self.noise_func = getattr(utils_Noise, self.noise_type)
-            self.matched_noise = False 
-
-            if(self.noise_type == 'meta_normal'):
-                self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
-                self.covariance_barycenter = utils_OT.covariance_barycenter(self.point_clouds_cov, max_iter = 100, tol = 1e-6)
-                self.noise_config.covariance_barycenter_chol = jnp.linalg.cholesky(self.covariance_barycenter)
-                self.noise_config.noise_df_scale = self.config.noise_df_scale
-            if(self.noise_type == 'chol_normal'):
-                self.point_clouds_mean, self.point_clouds_cov = utils_OT.weighted_mean_and_covariance(self.point_clouds, self.weights)
-                self.cov_chol = jax.vmap(jnp.linalg.cholesky)(self.point_clouds_cov)
-                self.noise_config.cov_chol_mean = jnp.mean(self.cov_chol, axis = 0)
-                self.noise_config.cov_chol_std = jnp.std(self.cov_chol, axis = 0)
-                self.noise_config.noise_df_scale = self.config.noise_df_scale
- 
 
         self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
 
@@ -147,17 +165,21 @@ class WassersteinFlowMatching:
             self.mini_batch_ot_mode = False
             if(isinstance(labels[0], (str, int))):
                 self.discrete_labels = True
-                self.config.discrete_labels = True
                 self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
                 self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
                 self.labels = jnp.array([self.label_to_num[label] for label in labels])
                 self.label_dim = len(np.unique(labels))
-                self.config.label_dim = self.label_dim 
+
+                # in config, add discrete_labels and label_dim
+                self.config = self.config.replace(discrete_labels=True, label_dim=self.label_dim)
+
             else:
                 self.discrete_labels = False
-                self.config.discrete_labels = False
                 self.labels = labels[None, :] if labels.ndim == 1 else labels
-            
+                self.label_dim = self.labels.shape[-1]
+                # in config, add discrete_labels and label_dim
+                self.config = self.config.replace(discrete_labels=False, label_dim=self.label_dim)
+
             self.guidance_gamma = self.config.guidance_gamma
             self.p_uncond = self.config.p_uncond if self.guidance_gamma > 1 else 0.0
 
@@ -333,6 +355,7 @@ class WassersteinFlowMatching:
             null_label = -1 * jnp.ones_like(labels_batch) if self.discrete_labels else jnp.zeros_like(labels_batch)
             labels_batch = jnp.where(is_uncond, null_label, labels_batch)
         
+        optimal_flow = - optimal_flow
         # Debugging, print shapes of input to apply:
 
         # print(f"point_cloud_interpolates shape: {point_cloud_interpolates.shape}")
@@ -343,6 +366,7 @@ class WassersteinFlowMatching:
         subkey, key = random.split(key)
         def loss_fn(params):
             # Time loss function evaluation
+   
             predicted_flow = state.apply_fn({"params": params},  
                                             point_cloud = point_cloud_interpolates, 
                                             t = interpolates_time, 
@@ -468,24 +492,40 @@ class WassersteinFlowMatching:
 
         :return: nothing
         """ 
+        print("Loading pre-trained model from", path)
 
         self.FlowMatchingModel = AttentionNN(config = self.config)
         with open(path, 'rb') as f:
             self.params = pickle.load(f)
 
+        self.state = self.create_train_state(
+                model=self.FlowMatchingModel,
+                learning_rate = 1, 
+                decay_steps = 1, 
+                key=random.key(0)
+            )
+        self.state = self.state.replace(params=self.params)
+
     @partial(jit, static_argnums=(0,))
     def get_flow(self, params, point_clouds, weights, t, labels = None):
 
         if(point_clouds.ndim == 2):
+            squeeze = True
             point_clouds = point_clouds[None,:, :]
             weights = weights[None, :]
-
-        flow = jnp.squeeze(self.FlowMatchingModel.apply({"params": params},
-                    point_cloud = point_clouds, 
-                    t = t * jnp.ones(point_clouds.shape[0]), 
-                    masks = weights>0, 
-                    labels = labels,
-                    deterministic = True))
+        else:
+            squeeze = False
+        
+   
+        flow = self.FlowMatchingModel.apply({"params": params},
+                point_cloud = point_clouds, 
+                t = t * jnp.ones(point_clouds.shape[0]), 
+                masks = weights>0, 
+                labels = labels,
+                deterministic = True)
+        
+        if(squeeze):
+            flow = jnp.squeeze(flow, axis = 0)
         return(flow)
     
     def transform_labels(self, labels, inverse = False):
@@ -625,7 +665,7 @@ class WassersteinFlowMatching:
                 v_u = self.get_flow(self.params, xt, particle_weights, t_curr, null_labels)
                 vt = v_u + self.guidance_gamma * (v_c - v_u)
 
-            x_mid = xt + 0.5 * dt * vt
+            x_mid = xt - 0.5 * dt * vt
             
             if self.guidance_gamma == 0.0 or generate_labels is None:
                 v_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, null_labels)
@@ -636,12 +676,13 @@ class WassersteinFlowMatching:
                 v_u_mid = self.get_flow(self.params, x_mid, particle_weights, t_mid, null_labels)
                 v_mid = v_u_mid + self.guidance_gamma * (v_c_mid - v_u_mid)
 
-            x_t_minus_dt = xt + dt * v_mid
+            x_t_minus_dt = xt - dt * v_mid
             generated_samples.append(x_t_minus_dt)
 
         # --- 5. Return Results ---
         if generate_labels is None:
             return generated_samples, particle_weights
         else:
-            final_labels = self.transform_labels(generate_labels, inverse=True)
+            final_labels = self.transform_labels(np.array(generate_labels), inverse=True)
             return generated_samples, particle_weights, final_labels
+
