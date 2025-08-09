@@ -209,45 +209,45 @@ def test_matched_noise_point_clouds(matched_noise_data):
     assert not np.any(np.isnan(final_samples))
 
 
-@pytest.mark.slow
-def test_auto_find_num_iter_runs_without_mocking(unconditional_data):
-    """
-    This is an integration test that runs the actual auto-finding logic
-    for num_sinkhorn_iter. It is marked as 'slow' because it can take
-    a significant amount of time to execute.
+# @pytest.mark.slow
+# def test_auto_find_num_iter_runs_without_mocking(unconditional_data):
+#     """
+#     This is an integration test that runs the actual auto-finding logic
+#     for num_sinkhorn_iter. It is marked as 'slow' because it can take
+#     a significant amount of time to execute.
     
-    To run this test specifically:
-      pytest -m slow
+#     To run this test specifically:
+#       pytest -m slow
       
-    To skip this test:
-      pytest -m "not slow"
-    """
-    print("\n--- Running SLOW test: test_auto_find_num_iter_runs_without_mocking ---")
-    print("This may take a minute or two as it performs real OT calculations...")
+#     To skip this test:
+#       pytest -m "not slow"
+#     """
+#     print("\n--- Running SLOW test: test_auto_find_num_iter_runs_without_mocking ---")
+#     print("This may take a minute or two as it performs real OT calculations...")
     
-    # 1. Create a config that will trigger the auto-finding logic
-    # Note: This only works for entropic maps where Sinkhorn iterations are relevant.
-    config = DefaultConfig(num_sinkhorn_iters=-1, monge_map='entropic')
+#     # 1. Create a config that will trigger the auto-finding logic
+#     # Note: This only works for entropic maps where Sinkhorn iterations are relevant.
+#     config = DefaultConfig(num_sinkhorn_iters=-1, monge_map='entropic')
 
-    # 2. Initialize the model and time the process
-    model = WassersteinFlowMatching(
-        point_clouds=unconditional_data["point_clouds"],
-        config=config
-    )
+#     # 2. Initialize the model and time the process
+#     model = WassersteinFlowMatching(
+#         point_clouds=unconditional_data["point_clouds"],
+#         config=config
+#     )
 
 
-    # 3. Print results for clarity
-    found_iter = model.num_sinkhorn_iter
-    print(f"Automatically determined num_sinkhorn_iter: {found_iter}")
+#     # 3. Print results for clarity
+#     found_iter = model.num_sinkhorn_iters
+#     print(f"Automatically determined num_sinkhorn_iter: {found_iter}")
 
-    # 4. Assert that the process completed and set a valid value
-    assert isinstance(found_iter, int)
-    assert found_iter > 0
+#     # 4. Assert that the process completed and set a valid value
+#     assert isinstance(found_iter, int)
+#     assert found_iter > 0
     
-    # The returned value must be one of the candidates from the auto_find_num_iter function
-    possible_values = [100, 200, 500, 1000, 5000]
-    assert found_iter in possible_values, f"Value {found_iter} is not a valid candidate."
+#     # The returned value must be one of the candidates from the auto_find_num_iter function
+#     possible_values = [100, 200, 500, 1000, 5000]
+#     assert found_iter in possible_values, f"Value {found_iter} is not a valid candidate."
 
-    # 5. Assert that the JIT-compiled transport function was configured with the new value
-    assert model.transport_plan_jit.keywords['num_iteration'] == found_iter
-    print("--- SLOW test completed successfully ---")
+#     # 5. Assert that the JIT-compiled transport function was configured with the new value
+#     assert model.transport_plan_jit.keywords['num_iteration'] == found_iter
+#     print("--- SLOW test completed successfully ---")

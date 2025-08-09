@@ -137,20 +137,20 @@ class BuresWassersteinFlowMatching:
         means_noise, covariances_noise = self.noise_func(batch_size = 10, 
                                                          noise_config = self.noise_config,
                                                          key = subkey)
-        
+        covariances_noise_tril = self.vmapped_fill_triangular_inverse(covariances_noise)
         subkey, key = random.split(key)
         
         if(self.labels is not None):
             params = model.init(rngs={"params": subkey}, 
                                 means = means_noise, 
-                                covariances = covariances_noise,
+                                covariances = covariances_noise_tril,
                                 t = jnp.ones((means_noise.shape[0])), 
                                 labels =  jnp.ones((means_noise.shape[0])),
                                 deterministic = True)['params']
         else:
             params = model.init(rngs={"params": subkey}, 
                                 means = means_noise, 
-                                covariances = covariances_noise,
+                                covariances = covariances_noise_tril,
                                 t = jnp.ones((means_noise.shape[0])), 
                                 deterministic = True)['params']
 
@@ -272,8 +272,11 @@ class BuresWassersteinFlowMatching:
         subkey, key = random.split(key)
 
         self.FlowMatchingModel = BuresWassersteinNN(config = self.config)
-        self.vmapped_fill_triangular = jax.jit(jax.vmap(fill_triangular, (0,), 0))
+
+
+        self.vmapped_fill_triangular = jax.jit(jax.vmap(partial(fill_triangular, d=self.space_dim), (0,), 0))
         self.vmapped_fill_triangular_inverse = jax.jit(jax.vmap(fill_triangular_inverse, (0,), 0))
+        self.f = jax.jit(jax.vmap(fill_triangular_inverse, (0,), 0))
 
         self.state = self.create_train_state(model = self.FlowMatchingModel,
                                              learning_rate=learning_rate, 

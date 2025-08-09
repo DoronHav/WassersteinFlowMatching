@@ -47,8 +47,8 @@ class WassersteinFlowMatching:
 
         self.config = config
 
-        for key, value in kwargs.items():
-            setattr(self.config, key, value)
+        if kwargs:
+            config = config.replace(**kwargs)
         
         self.scaling = self.config.scaling
         self.scaling_factor = self.config.scaling_factor
@@ -165,17 +165,21 @@ class WassersteinFlowMatching:
             self.mini_batch_ot_mode = False
             if(isinstance(labels[0], (str, int))):
                 self.discrete_labels = True
-                setattr(self.config, self.discrete_labels, True)
                 self.label_to_num = {label: i for i, label in enumerate(np.unique(labels))}
                 self.num_to_label = {i: label for i, label in enumerate(np.unique(labels))}
                 self.labels = jnp.array([self.label_to_num[label] for label in labels])
                 self.label_dim = len(np.unique(labels))
-                self.config.label_dim = self.label_dim 
+
+                # in config, add discrete_labels and label_dim
+                self.config = self.config.replace(discrete_labels=True, label_dim=self.label_dim)
+
             else:
                 self.discrete_labels = False
-                setattr(self.config, self.discrete_labels, False)
                 self.labels = labels[None, :] if labels.ndim == 1 else labels
-            
+                self.label_dim = self.labels.shape[-1]
+                # in config, add discrete_labels and label_dim
+                self.config = self.config.replace(discrete_labels=False, label_dim=self.label_dim)
+
             self.guidance_gamma = self.config.guidance_gamma
             self.p_uncond = self.config.p_uncond if self.guidance_gamma > 1 else 0.0
 
@@ -679,6 +683,6 @@ class WassersteinFlowMatching:
         if generate_labels is None:
             return generated_samples, particle_weights
         else:
-            final_labels = self.transform_labels(generate_labels, inverse=True)
+            final_labels = self.transform_labels(np.array(generate_labels), inverse=True)
             return generated_samples, particle_weights, final_labels
 

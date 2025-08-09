@@ -416,7 +416,7 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, num_calc=100, sampl
             
             # Replicate solver logic to access the convergence status
             # Note: cost_fn=None uses the default Squared Euclidean distance.
-            geom = ott.geometry.PointCloud(x_points, y_points, epsilon=eps, scale_cost='max_cost')
+            geom = ott.geometry.pointcloud.PointCloud(x_points, y_points, epsilon=eps, scale_cost='max_cost')
             ot_solve = linear.solve(
                 geom,
                 a=a_weights,

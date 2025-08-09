@@ -80,6 +80,14 @@ class SpatialWassersteinFlowMatching:
 
         self.noise_config = types.SimpleNamespace()
         self.noise_type = self.config.noise_type
+
+        # make sure noise_type is normal if not, return an error
+
+        if self.noise_type not in ['normal', 'uniform']:
+            raise ValueError(f"Unsupported noise type: {self.noise_type}. Supported types are 'normal', 'uniform'")
+
+        self.noise_config.minval = self.exp_data_train.min()
+        self.noise_config.maxval = self.exp_data_train.max()
         self.noise_func = getattr(utils_Noise, self.noise_type)
         
         # --- Optimal Transport (Monge Map) Setup ---
@@ -129,13 +137,14 @@ class SpatialWassersteinFlowMatching:
             
         # --- Conditioning and Guidance Setup ---
         # NOTE: This logic correctly handles conditional vs. unconditional model setup.
+        self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
         if conditioning_obs or conditioning_obsm:
             self.conditioning_vectors = self._get_conditioning_data(self.adata, 
                                                                     conditioning_obs = conditioning_obs, 
                                                                     conditioning_obsm = conditioning_obsm)
             self.guidance_gamma = self.config.guidance_gamma
             self.p_uncond = self.config.p_uncond if self.guidance_gamma > 1 else 0.0
-            self.config = self.config.replace(mini_batch_ot_mode = False)  # Disable mini-batch OT for conditional models
+            self.mini_batch_ot_mode = False
             
             if self.guidance_gamma > 1:
                 print(f"Using conditioning with guidance (gamma={self.guidance_gamma}, p_uncond={self.p_uncond})")
@@ -148,7 +157,6 @@ class SpatialWassersteinFlowMatching:
             print("No conditioning provided, training an unconditional model.")
 
         # --- Mini-batch OT Setup ---
-        self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
         if self.mini_batch_ot_mode:
             self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
             if self.mini_batch_ot_solver == 'entropic':
@@ -275,7 +283,31 @@ class SpatialWassersteinFlowMatching:
             padded_weights[i, :num_neighbors] = 1.0 / num_neighbors
 
         return jnp.asarray(padded_pcs), jnp.asarray(padded_weights)
+    
+    def minibatch_ot(self, point_clouds, point_cloud_weights, noise, noise_weights):
+
+        """
+        :meta private:
+        """
+            
+        matrix_ind = jnp.array(jnp.meshgrid(jnp.arange(point_clouds.shape[0]), jnp.arange(noise.shape[0]))).T.reshape(-1, 2)
+
+
+        # compute pairwise ot between point clouds and noise:
         
+        if(self.mini_batch_ot_solver == 'frechet'):
+            mean_x, cov_x = utils_OT.weighted_mean_and_covariance(point_clouds, point_cloud_weights)
+            mean_y, cov_y = utils_OT.weighted_mean_and_covariance(noise, noise_weights)
+            ot_matrix = self.ot_mat_jit([mean_x[matrix_ind[:, 0]], cov_x[matrix_ind[:, 0]]], 
+                                        [mean_y[matrix_ind[:, 1]], cov_y[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
+        else:
+            ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
+                                        [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
+
+        noise_ind = utils_OT.ot_mat_from_distance(ot_matrix, 0.002, True)
+        return(noise_ind)
+
+
     def create_train_state(self, model, learning_rate, decay_steps, key=random.key(0)):
         """Creates the initial training state for the model."""
         subkey, key = random.split(key)

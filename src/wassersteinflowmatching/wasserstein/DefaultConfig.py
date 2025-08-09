@@ -17,6 +17,8 @@ class DefaultConfig:
     scaling: str = 'None'
     scaling_factor: float = 1.0
     guidance_gamma: float = 1.5
+    discrete_labels: Optional[bool] = None
+    label_dim: Optional[int] = None  # Set to None if labels are not used
     p_uncond: float = 0.1
     embedding_dim: int = 512
     num_layers: int = 6
@@ -34,7 +36,7 @@ class SpatialDefaultConfig(DefaultConfig):
     :param rep: (str, optional) The key in `adata.obsm` to use as the expression representation. If None, `adata.X` is used. (default None)
     :param batch_key: (str, optional) The key in `adata.obs` that denotes the sample/batch for each cell. If None, all cells are treated as one batch. (default None)
     """
-    noise_type = 'normal'
+    noise_type: str = 'normal'
     rep: Optional[str] = None
     batch_key: Optional[str] = None
     spatial_key: str = 'spatial'

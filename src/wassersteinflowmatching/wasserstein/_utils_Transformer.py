@@ -123,6 +123,6 @@ class AttentionNN(nn.Module):
         x = nn.Dense(features=space_dim, 
                     kernel_init=nn.initializers.variance_scaling(1e-5, mode='fan_in', distribution='truncated_normal'), 
                     bias_init=nn.initializers.zeros)(x)
-        return 
+        return x
 
     
