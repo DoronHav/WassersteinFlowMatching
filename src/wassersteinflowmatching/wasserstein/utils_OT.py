@@ -357,90 +357,144 @@ def transport_plan_euclidean(pc_x, pc_y):
 
 
 
-def auto_find_num_iter(point_clouds, weights, eps, lse_mode, num_calc=100, sample_size=2048, noise_point_clouds=None, noise_weights=None):
+def auto_find_num_iter(
+    point_clouds, 
+    weights, 
+    eps, 
+    lse_mode, 
+    num_calc=100, 
+    sample_size=2048, 
+    noise_point_clouds=None, 
+    noise_weights=None,
+    sinkhorn_limit=5000,
+    inner_iterations=10  # Check convergence every 10 steps (standard OTT default)
+):
     """
-    Find the minimum number of iterations for which at least 80% of OT calculations converge.
-
-    It tests a predefined list of iteration counts on randomly sampled pairs of point clouds.
-    If noise_point_clouds are provided, it compares clouds from the original set against the noise set.
-    For performance, if a point cloud contains more points than `sample_size`, a random subset
-    is used for the calculation.
-
-    Args:
-        point_clouds (list): A list of point cloud coordinate arrays.
-        weights (list): A list of corresponding weight arrays for each point cloud.
-        eps (float): Coefficient of entropic regularization.
-        lse_mode (bool): Whether to use log-sum-exp mode.
-        num_calc (int): The number of random pairs to test for each iteration count.
-        sample_size (int): The number of points to sample from larger point clouds.
-        noise_point_clouds (list, optional): A list of noise point cloud arrays. Defaults to None.
-        noise_weights (list, optional): A list of corresponding weights for noise point clouds. Defaults to None.
-
-    Returns:
-        int: The recommended number of iterations.
+    Optimized version using JAX vmap and error tracing.
+    Runs a single batched pass to determine the earliest iteration count 
+    where 80% of the samples converge.
     """
-    
-    num_iter_test = [100, 200, 500, 1000, 5000]
+
     num_clouds = len(point_clouds)
     num_noise_clouds = len(noise_point_clouds) if noise_point_clouds is not None else 0
+    
+    # --------------------------------------------------------------------
+    # 1. DATA PREPARATION (CPU/NumPy)
+    # JAX requires fixed array shapes for vmapping. We must sample and 
+    # stack the data into dense tensors (Batch, SampleSize, Dim) first.
+    # --------------------------------------------------------------------
+    
+    batch_x_list, batch_y_list = [], []
+    batch_a_list, batch_b_list = [], []
 
-    for n_iter in num_iter_test:
-        converged_count = 0
-        for _ in tqdm(range(num_calc), desc=f"Testing Entropic OT convergence with {n_iter} iterations"):
+    # Determine dimensionality from the first cloud
+    dim = point_clouds[0].shape[1]
+
+    for _ in range(num_calc):
+        # -- Selection Logic --
+        if noise_point_clouds is not None and noise_weights is not None:
+            idx1 = np.random.randint(0, num_clouds)
+            idx2 = np.random.randint(0, num_noise_clouds)
+            x, a = point_clouds[idx1], weights[idx1]
+            y, b = noise_point_clouds[idx2], noise_weights[idx2]
+        else:
+            idx1, idx2 = np.random.choice(num_clouds, 2, replace=False)
+            x, a = point_clouds[idx1], weights[idx1]
+            y, b = point_clouds[idx2], weights[idx2]
+
+        # -- Downsampling Logic --
+        if len(x) > sample_size:
+            ix = np.random.choice(len(x), sample_size, replace=False)
+            x, a = x[ix], a[ix]
+        if len(y) > sample_size:
+            iy = np.random.choice(len(y), sample_size, replace=False)
+            y, b = y[iy], b[iy]
             
-            # --- MODIFIED LOGIC: Select point clouds based on noise arguments ---
-            if noise_point_clouds is not None and noise_weights is not None:
-                # Select one from original clouds and one from noise clouds
-                idx1 = np.random.randint(0, num_clouds)
-                idx2 = np.random.randint(0, num_noise_clouds)
-                x_points, a_weights = point_clouds[idx1], weights[idx1]
-                y_points, b_weights = noise_point_clouds[idx2], noise_weights[idx2]
-            else:
-                # Original behavior: randomly select two different point clouds for comparison
-                idx1, idx2 = np.random.choice(num_clouds, 2, replace=False)
-                x_points, a_weights = point_clouds[idx1], weights[idx1]
-                y_points, b_weights = point_clouds[idx2], weights[idx2]
-            # --------------------------------------------------------------------
+        # Handle cases where clouds are smaller than sample_size (pad or error)
+        # For this snippet, we assume inputs are at least sample_size or we take all.
+        # If strict padding is needed, it should happen here. 
+        # Here we assume x and y are now (sample_size, dim).
+        
+        batch_x_list.append(x)
+        batch_y_list.append(y)
+        batch_a_list.append(a)
+        batch_b_list.append(b)
 
-            # --- OPTIMIZATION: Sample large point clouds to speed up calculation ---
-            if len(x_points) > sample_size:
-                indices_x = np.random.choice(len(x_points), sample_size, replace=False)
-                x_points = x_points[indices_x]
-                a_weights = a_weights[indices_x]
-            
-            if len(y_points) > sample_size:
-                indices_y = np.random.choice(len(y_points), sample_size, replace=False)
-                y_points = y_points[indices_y]
-                b_weights = b_weights[indices_y]
-            # --------------------------------------------------------------------
-            
-            # Replicate solver logic to access the convergence status
-            # Note: cost_fn=None uses the default Squared Euclidean distance.
-            geom = ott.geometry.pointcloud.PointCloud(x_points, y_points, epsilon=eps, scale_cost='max_cost')
-            ot_solve = linear.solve(
-                geom,
-                a=a_weights,
-                b=b_weights,
-                min_iterations=n_iter,
-                max_iterations=n_iter,
-                lse_mode=lse_mode
-            )
+    # Convert to JAX arrays
+    batch_x = jnp.array(np.stack(batch_x_list))  # Shape: (num_calc, sample_size, dim)
+    batch_y = jnp.array(np.stack(batch_y_list))
+    batch_a = jnp.array(np.stack(batch_a_list))
+    batch_b = jnp.array(np.stack(batch_b_list))
 
-            if ot_solve and ot_solve.converged:
-                converged_count += 1
+    # --------------------------------------------------------------------
+    # 2. DEFINING THE VMAP SOLVER (JAX/GPU)
+    # --------------------------------------------------------------------
+    
+    def solve_one(x, y, a, b):
+        geom = ott.geometry.pointcloud.PointCloud(x, y, epsilon=eps, scale_cost='max_cost')
+        
+        # We define the solver with the maximum limit.
+        # store_errors=True is crucial: it saves the error at every `inner_iterations` block.
+        out = linear.solve(
+            geom,
+            a=a,
+            b=b,
+            min_iterations=0, 
+            max_iterations=sinkhorn_limit,
+            inner_iterations=inner_iterations, 
+            lse_mode=lse_mode,
+        )
+        return out.errors
 
-        # Check if the convergence rate is 80% or higher
-        convergence_rate = round((converged_count / num_calc) * 100)
-        print(f"Convergence rate with {n_iter} iterations: {convergence_rate}%")
+    # JIT compile and VMAP over the 0-th dimension (batch dimension)
+    solve_batch = jax.jit(jax.vmap(solve_one, in_axes=(0, 0, 0, 0)))
 
-        if (converged_count / num_calc) >= 0.8:
-            print(f"INFO: Found sufficient convergence at {n_iter} iterations.")
-            return n_iter
+    # Run the batch computation
+    # errors shape: (num_calc, ceil(sinkhorn_limit / inner_iterations))
+    # thresholds shape: (num_calc,) (Usually fixed, but returned for safety)
+    errors = solve_batch(batch_x, batch_y, batch_a, batch_b)
 
-    # If no value meets the criterion, return the highest tested number of iterations
-    print("WARNING: Convergence rate did not reach 80% for any tested iteration count. Returning the max value.")
-    return num_iter_test[-1]
+    # --------------------------------------------------------------------
+    # 3. ANALYZING THE TRACE
+    # --------------------------------------------------------------------
 
+    # errors contains the marginal error at steps [10, 20, 30...].
+    # If the solver converged early, OTT usually pads the error array with -1 or inf.
+    # However, standard logic is: check if error < threshold.
+    
+    # Create a matrix of booleans: True if converged at that step
+    # We need to broadcast the threshold across the time dimension
+    
+    # Identify valid convergence: Error is small, AND not the padding value (-1)
+    # Note: If OTT uses -1 for padding, we must ensure -1 is not interpreted as "converged" (which is < threshold).
+    # Usually error is positive. We assume padded values are -1.
+    is_converged = (errors < -1) 
+    
+    # Calculate convergence rate per column (time step)
+    # Shape: (num_steps,)
+    convergence_rates = jnp.mean(is_converged.astype(float), axis=0)
+    
+    # Find the first index where rate >= 0.8
+    # argmax returns the *first* occurrence of the max value. 
+    # We create a mask of valid candidates first.
+    valid_indices = convergence_rates >= 0.8
+    
+    # Check if we ever hit 80%
+    if not jnp.any(valid_indices):
+        print(f"WARNING: Convergence rate never reached 80% (Max rate: {jnp.max(convergence_rates):.2f}).")
+        return sinkhorn_limit
+
+    # jnp.argmax on a boolean array finds the index of the first True
+    first_success_index = jnp.argmax(valid_indices)
+    
+    # Convert index back to iteration count
+    # +1 because index 0 represents the first block of `inner_iterations`
+    recommended_iter = (first_success_index + 1) * inner_iterations
+    
+    print(f"INFO: Found sufficient convergence (80%) at {recommended_iter} iterations.")
+    
+    # Convert from JAX array to standard Python int
+    return int(recommended_iter)
 
 
 
