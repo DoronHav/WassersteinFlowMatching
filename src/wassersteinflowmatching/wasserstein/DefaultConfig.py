@@ -2,7 +2,7 @@ from flax import struct # type: ignore
 from typing import Optional
 
 @struct.dataclass
-class DefaultConfig:
+class WassersteinFlowMatchingConfig:
     
     monge_map: str = 'rounded_matching'
     wasserstein_eps: float = 0.002
@@ -27,10 +27,10 @@ class DefaultConfig:
     mlp_hidden_dim: int = 512
 
 @struct.dataclass
-class SpatialDefaultConfig(DefaultConfig):
+class SpatialWassersteinFlowMatchingConfig(WassersteinFlowMatchingConfig):
     """
-    Default configuration for SpatialWormhole, inheriting from DefaultConfig.
-    
+    Default configuration for SpatialWassersteinFlowMatching, inheriting from WassersteinFlowMatchingConfig.
+
     Adds parameters specific to handling AnnData objects.
     
     :param rep: (str, optional) The key in `adata.obsm` to use as the expression representation. If None, `adata.X` is used. (default None)

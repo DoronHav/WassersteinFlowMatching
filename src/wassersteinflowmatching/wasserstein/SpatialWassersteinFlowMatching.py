@@ -20,7 +20,7 @@ import scipy.sparse # type: ignore
 import wassersteinflowmatching.wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.wasserstein.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Transformer import AttentionNN # type: ignore
-from wassersteinflowmatching.wasserstein.DefaultConfig import DefaultConfig, SpatialDefaultConfig # type: ignore
+from wassersteinflowmatching.wasserstein.DefaultConfig import WassersteinFlowMatchingConfig, SpatialWassersteinFlowMatchingConfig # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
 
@@ -46,21 +46,26 @@ class SpatialWassersteinFlowMatching:
         k_neighbours = 8,
         conditioning_obs: Optional[list] = None,
         conditioning_obsm: Optional[list] = None,
-        config = SpatialDefaultConfig,
+        config = SpatialWassersteinFlowMatchingConfig,
         **kwargs,
     ):
         print("Initializing Wasserstein Flow Matching")
 
+        
         if not isinstance(adata, anndata.AnnData):
             raise TypeError("Input 'adata' must be an anndata.AnnData object.")
         if 'spatial' not in adata.obsm:
              raise ValueError("Input 'adata' must have spatial coordinates in .obsm['spatial'].")
 
+        if isinstance(config, type):
+            config = config()
+        
         # --- Configuration Setup ---
         if config is None:
-            config = SpatialDefaultConfig()
+            config = SpatialWassersteinFlowMatchingConfig()
         if kwargs:
             config = config.replace(**kwargs)
+
         self.config = config
         self.adata = adata
 
