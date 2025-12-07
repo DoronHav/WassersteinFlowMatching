@@ -4,70 +4,310 @@ from ott.solvers import linear # type: ignore
 import jax # type: ignore
 from jax import lax # type: ignore
 from jax import random # type: ignore
+import numpy as np
+from tqdm import tqdm
 
 
-
-def sample_ot_matrix(mat, key):
+def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_func, num_calc=100, sample_size=2048, noise_point_clouds=None, noise_weights=None, sinkhorn_limit=5000, inner_iterations=10):
     """
-    Sample a transport matrix from an optimal transport plan.
-    
-    Args:
-    pc_x: Source point cloud.
-    pc_y: Target point cloud.
-    mat: Optimal transport matrix.
-    key: PRNG key.
-    
+    Find the minimum number of iterations for which at least 80% of OT calculations converge.
 
-    """
-    sample_key, key = random.split(key)
-    map_ind = random.categorical(sample_key, logits = jnp.nan_to_num(jnp.log(mat), nan = -jnp.inf), axis = -1)
-    return map_ind
-
-def argmax_row_iter(M, key = random.PRNGKey(0)):
-    """
-    Convert a soft assignment matrix M to a hard assignment vector
-    by iteratively finding the largest value in M and making assignments.
+    Optimized version using JAX vmap and error tracing.
+    Runs a single batched pass to determine the earliest iteration count 
+    where 80% of the samples converge.
 
     Args:
-        M (jnp.ndarray): A square soft assignment matrix.
+        point_clouds (list): A list of point cloud coordinate arrays.
+        weights (list): A list of corresponding weight arrays for each point cloud.
+        eps (float): Coefficient of entropic regularization.
+        lse_mode (bool): Whether to use log-sum-exp mode.
+        distance_matrix_func (callable): Function to compute distance matrix.
+        num_calc (int): The number of random pairs to test.
+        sample_size (int): The number of points to sample from larger point clouds.
+        noise_point_clouds (list, optional): A list of noise point cloud arrays. Defaults to None.
+        noise_weights (list, optional): A list of corresponding weights for noise point clouds. Defaults to None.
+        sinkhorn_limit (int): Maximum iterations to test.
+        inner_iterations (int): Check convergence every N steps.
+
+    Returns:
+        int: The recommended number of iterations.
+    """
+    
+    num_clouds = len(point_clouds)
+    num_noise_clouds = len(noise_point_clouds) if noise_point_clouds is not None else 0
+    
+    batch_x_list, batch_y_list = [], []
+    batch_a_list, batch_b_list = [], []
+
+    for _ in range(num_calc):
+        # -- Selection Logic --
+        if noise_point_clouds is not None and noise_weights is not None:
+            idx1 = np.random.randint(0, num_clouds)
+            idx2 = np.random.randint(0, num_noise_clouds)
+            x, a = point_clouds[idx1], weights[idx1]
+            y, b = noise_point_clouds[idx2], noise_weights[idx2]
+        else:
+            idx1, idx2 = np.random.choice(num_clouds, 2, replace=False)
+            x, a = point_clouds[idx1], weights[idx1]
+            y, b = point_clouds[idx2], weights[idx2]
+
+        # -- Downsampling / Upsampling Logic --
+        # Ensure fixed size for vmap
+        if len(x) != sample_size:
+            replace = len(x) < sample_size
+            ix = np.random.choice(len(x), sample_size, replace=replace)
+            x, a = x[ix], a[ix]
+        
+        if len(y) != sample_size:
+            replace = len(y) < sample_size
+            iy = np.random.choice(len(y), sample_size, replace=replace)
+            y, b = y[iy], b[iy]
+            
+        # Normalize weights
+        a = a / np.sum(a)
+        b = b / np.sum(b)
+        
+        batch_x_list.append(x)
+        batch_y_list.append(y)
+        batch_a_list.append(a)
+        batch_b_list.append(b)
+
+    # Convert to JAX arrays
+    batch_x = jnp.array(np.stack(batch_x_list))
+    batch_y = jnp.array(np.stack(batch_y_list))
+    batch_a = jnp.array(np.stack(batch_a_list))
+    batch_b = jnp.array(np.stack(batch_b_list))
+
+    # --------------------------------------------------------------------
+    # 2. DEFINING THE VMAP SOLVER (JAX/GPU)
+    # --------------------------------------------------------------------
+    
+    def solve_one(x, y, a, b):
+        distmat = distance_matrix_func(x, y)
+        geom = ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost')
+        
+        out = linear.solve(
+            geom,
+            a=a,
+            b=b,
+            min_iterations=0, 
+            max_iterations=sinkhorn_limit,
+            inner_iterations=inner_iterations, 
+            lse_mode=lse_mode,
+        )
+        return out.errors
+
+    # JIT compile and VMAP over the 0-th dimension (batch dimension)
+    solve_batch = jax.jit(jax.vmap(solve_one, in_axes=(0, 0, 0, 0)))
+ 
+    # Run the batch computation
+    errors = solve_batch(batch_x, batch_y, batch_a, batch_b)
+
+    # --------------------------------------------------------------------
+    # 3. ANALYZING THE TRACE
+    # --------------------------------------------------------------------
+
+    # OTT pads errors with -1. Real errors are positive.
+    # Convergence is when error < threshold (default 1e-3 in linear.solve) OR when it's already finished (-1).
+    threshold = 1e-3 
+    
+    # If error is -1, it means it finished in a previous step (converged).
+    # If error is > 0 and < threshold, it converged at this step.
+    is_converged = (errors == -1) | ((errors > -1) & (errors < threshold))
+    
+    # Calculate convergence rate per column (time step)
+    convergence_rates = jnp.mean(is_converged.astype(float), axis=0)
+    
+    # Find the first index where rate >= 0.8
+    valid_indices = convergence_rates >= 0.8
+    
+    if not jnp.any(valid_indices):
+        print(f"WARNING: Convergence rate never reached 80% (Max rate: {jnp.max(convergence_rates):.2f}).")
+        return sinkhorn_limit
+
+    first_success_index = jnp.argmax(valid_indices)
+    
+    # Convert index back to iteration count
+    recommended_iter = (first_success_index + 1) * inner_iterations
+    
+    print(f"INFO: Found sufficient convergence (80%) at {recommended_iter} iterations.")
+    
+    return int(recommended_iter)
+
+
+def get_assignments_sampling(P, key, pc_y=None):
+    """
+    Get assignments by sampling from the OT matrix rows.
+    (JAX-compatible version)
+
+    For each real source point, this treats the corresponding row in P as a
+    probability distribution and samples a single target point. Returns coordinates or indices.
+
+    Args:
+        P: The (padded) optimal transport matrix.
+        key: A JAX random key for sampling.
+        pc_y: The target point cloud coordinates. If None, returns only indices.
+
+    Returns:
+        If pc_y is provided: (coordinates, assignments) where coordinates are target points
+        If pc_y is None: (None, assignments) where assignments are indices
+    """
+    row_sums = jnp.sum(P, axis=1)
+    P_normalized = P / (row_sums[:, None] + 1e-9)
+
+    # Generate a key for each source point (row)
+    keys = jax.random.split(key, P.shape[0])
+
+    def _sample_row(probs, is_real, subkey):
+        """Samples a single target index for one source point."""
+        # If the row is not real (a padded point), return -1.
+        # Otherwise, sample from the target distribution.
+        return jax.lax.cond(
+            is_real,
+            lambda: jax.random.choice(subkey, a=probs.shape[0], p=probs),
+            lambda: -1
+        )
+
+    # Vmap the sampling function across all rows.
+    is_real_rows = row_sums > 1e-7
+    assignments = jax.vmap(_sample_row)(P_normalized, is_real_rows, keys)
+    
+    # Return coordinates if pc_y is provided, otherwise just assignments
+    if pc_y is None:
+        return None, assignments
+    else:
+        return pc_y[assignments.astype(jnp.int32)], assignments
+
+def get_assignments_rounding(P, pc_y=None):
+    """
+    Get assignments using a greedy rounding scheme (one-to-one).
+    (JAX-compatible version)
+
+    This function iteratively finds the highest value in the transport matrix,
+    assigns the corresponding points, and removes them from consideration.
+    Returns assigned coordinates or indices.
+
+    Args:
+        P: The (padded) optimal transport matrix.
+        pc_y: The target point cloud coordinates. If None, returns only indices.
         
     Returns:
-        jnp.ndarray: A vector of length N where the i-th element is the assignment index.
+        If pc_y is provided: (coordinates, assignments) where coordinates are target points
+        If pc_y is None: (None, assignments) where assignments are indices
     """
-    N = M.shape[0]
-    assignment = jnp.full(N, -1, dtype=jnp.int32)
-
-    def body_fun(_, val):
-        M, assignment = val
-        
-        # Find the global maximum
-        flat_idx = jnp.argmax(M)
-        i, j = jnp.unravel_index(flat_idx, M.shape)
-        
-        # Update assignment
-        assignment = assignment.at[i].set(j)
-        
-        # Set the corresponding row and column to -inf
-        M = M.at[i, :].set(-1)
-        M = M.at[:, j].set(-1)
-        
-        return M, assignment
-
-    _, assignment = lax.fori_loop(0, N, body_fun, (M, assignment))
-
-    return assignment
-
-
-def mask_matrix_by_weights(M, row_weights, col_weights):
-    # Create masks for zero weights
-    row_mask = (row_weights == 0)[:, None]  # Shape (n, 1) for broadcasting
-    col_mask = (col_weights == 0)[None, :]  # Shape (1, m) for broadcasting
+    # Infer which rows/cols correspond to real vs. padded points.
+    is_real_row = P.sum(axis=1) > 1e-7
     
-    # Combine masks with OR operation
-    combined_mask = jnp.logical_or(row_mask, col_mask)
+    # The number of assignments to make is fixed at compile time for `fori_loop`.
+    # We loop for the maximum possible number of assignments.
+    num_iter = min(P.shape[0], P.shape[1])
+
+    def loop_body(i, state):
+        used_rows, used_cols, assignments = state
+
+        # Mask P to only consider valid, unassigned entries.
+        valid_entries_mask = ~used_rows[:, None] & ~used_cols[None, :]
+        P_masked = jnp.where(valid_entries_mask, P, -1.0)
+        
+        # Find the best available assignment.
+        row_idx, col_idx = jnp.unravel_index(jnp.argmax(P_masked), P.shape)
+        
+        # This conditional update is the JAX-friendly way to handle state
+        # changes inside a loop.
+        return jax.lax.cond(
+            P_masked[row_idx, col_idx] >= 0,
+            # If a valid assignment was found, update the state.
+            lambda: (
+                used_rows.at[row_idx].set(True),
+                used_cols.at[col_idx].set(True),
+                assignments.at[row_idx].set(col_idx)
+            ),
+            # Otherwise, return the state unchanged.
+            lambda: state
+        )
+
+    # Initialize the state for the loop.
+    # `used_rows/cols` are True if the point has been assigned or is padded.
+    init_state = (
+        ~is_real_row, # Initially, only padded rows are "used".
+        ~(P.sum(axis=0) > 1e-7), # Initially, only padded cols are "used".
+        jnp.full(P.shape[0], -1, dtype=jnp.int32) # Assignments start as -1.
+    )
+
+    final_state = jax.lax.fori_loop(0, num_iter, loop_body, init_state)
+
+    assignments = final_state[2]
     
-    # Use where to set masked elements to -1
-    return jnp.where(combined_mask, -0.5, M)
+    # Return coordinates if pc_y is provided, otherwise just assignments
+    if pc_y is None:
+        return None, assignments
+    else:
+        return pc_y[assignments.astype(jnp.int32)], assignments
+
+
+def get_assignments_entropic(P, pc_y, weighted_mean_func):
+    """
+    Get assignments as the barycentric projection of source points.
+    (JAX-compatible version)
+
+    Maps each source point to a weighted average of target points.
+
+    Args:
+        P: The (padded) optimal transport matrix.
+        pc_y: The (padded) target point cloud coordinates.
+        weighted_mean_func: A JAX-compatible function that computes the
+                            weighted mean of a set of points.
+    
+    Returns:
+        An array of shape [P.shape[0], num_dims] representing the new
+        positions (barycenters) for each source point. Padded points are
+        mapped to the zero vector.
+    """
+    row_sums = jnp.sum(P, axis=1, keepdims=True)
+    P_normalized = P / (row_sums + 1e-9)
+
+    # vmap the weighted mean function over each row of the normalized P matrix.
+    vmap_barycenter = jax.vmap(
+        lambda weights: weighted_mean_func(pc_y, weights)
+    )
+    
+    barycenters = vmap_barycenter(P_normalized)
+    return barycenters, 0
+
+
+
+def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = False, num_iteration = 200): 
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    distmat = distance_matrix_func(pc_x, pc_y)
+    
+    ot_solve = linear.solve(
+        ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost'),
+        a = w_x,
+        b = w_y,
+        min_iterations = num_iteration,
+        max_iterations = num_iteration,
+        lse_mode = lse_mode)
+    
+    ot_matrix = ot_solve.matrix
+    return(ot_matrix, ot_solve)
+
+
+def transport_plan_euclidean(pc_x, pc_y): 
+    matrix = jnp.eye(pc_x.shape[0])
+    return(matrix, 0)
+
+
+def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
+    ot_solve = linear.solve(
+        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
+        lse_mode = lse_mode,
+        min_iterations = 200,
+        max_iterations = 200)
+    _, map_ind = get_assignments_rounding(ot_solve.matrix, pc_y=None)
+    return(map_ind, ot_solve)
+
 
 def weighted_mean_and_covariance(pc_x, weights):
     """
@@ -220,37 +460,3 @@ def frechet_distance(Nx, Ny):
     
     # Compute the Fréchet distance
     return(mean_diff_squared + trace_sum - 2 * trace_term)
-
-def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
-    ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
-        lse_mode = lse_mode,
-        min_iterations = 200,
-        max_iterations = 200)
-    map_ind = argmax_row_iter(ot_solve.matrix)
-    return(map_ind)
-
-
-
-def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = False, num_iteration = 200): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
-
-    distmat = distance_matrix_func(pc_x, pc_y)
-    
-    ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost'),
-        a = w_x,
-        b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
-    
-    ot_matrix = mask_matrix_by_weights(ot_solve.matrix, w_x, w_y)
-    # map_ind = argmax_row_iter(ot_matrix)
-    return(ot_matrix, ot_solve)
-
-
-def transport_plan_euclidean(pc_x, pc_y): 
-    matrix = jnp.eye(pc_x.shape[0])
-    return(matrix, 0)

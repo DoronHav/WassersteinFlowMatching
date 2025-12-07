@@ -2,74 +2,89 @@ import jax  # type: ignore
 import jax.numpy as jnp  # type: ignore
 import jax.random as random  # type: ignore
 from flax import linen as nn  # type: ignore
+from typing import Sequence, Optional, Callable
 
-
-from wassersteinflowmatching.wasserstein.DefaultConfig import DefaultConfig
+from wassersteinflowmatching.wasserstein.DefaultConfig import WassersteinFlowMatchingConfig
 
 class FeedForward(nn.Module):
-    """Transformer MLP / feed-forward block.
-
-    Attributes:
-    config: DefaultConfig dataclass containing hyperparameters.
-    out_dim: optionally specify out dimension.
     """
-    config: DefaultConfig
+    Transformer MLP / feed-forward block.
+    (Pre-norm compatible version)
+    """
+    config: dict
 
     @nn.compact
-    def __call__(self, inputs):
-        config = self.config
-        mlp_hidden_dim = config.mlp_hidden_dim
-
-        x = nn.Dense(features = mlp_hidden_dim)(inputs)
-        x = nn.leaky_relu(x)
-        output = nn.Dense(inputs.shape[-1])(x) + inputs
+    def __call__(self, inputs, deterministic: bool = True, dropout_rng=None):
+        # Use mlp_hidden_dim from your config
+        mlp_hidden_dim = self.config.mlp_hidden_dim
+        
+        x = nn.Dense(features=mlp_hidden_dim)(inputs)
+        x = nn.Dropout(rate=self.config.dropout_rate)(x, deterministic=deterministic, rng=dropout_rng)
+        x = nn.leaky_relu(x) 
+        output = nn.Dense(inputs.shape[-1])(x)
         return output
 
 class EncoderBlock(nn.Module):
     """
-    Transformer encoder layer, modified to accept time and label embeddings.
-
-    Attributes:
-    config: DefaultConfig dataclass containing hyperparameters.
+    Transformer encoder layer (optionally conditioned) using 
+    Pre-Normalization for improved stability in deep networks.
     """
-    config: DefaultConfig
-    
+
+    config: dict
+
     @nn.compact
-    def __call__(self, inputs, t_emb, l_emb, masks, deterministic, dropout_rng = random.key(0)):
-        """
-        The call signature is updated to accept t_emb and l_emb.
-        """
-        config = self.config
-        num_heads = config.num_heads
-        dropout_rate = config.dropout_rate
+    def __call__(
+        self, 
+        inputs: jnp.ndarray, 
+        masks: Optional[jnp.ndarray] = None, 
+        dropout_rng: Optional[jnp.ndarray] = None, 
+        t_emb: Optional[jnp.ndarray] = None, 
+        c_emb: Optional[jnp.ndarray] = None,
+        deterministic: bool = True
+    ) -> jnp.ndarray:
         
-        # --- 1. Create Conditioning Vector ---
-        # Combine time and label embeddings. `t_emb` and `l_emb` have shape [batch, dim].
-        # We add a `None` dimension to make it [batch, 1, dim] for broadcasting.
-        conditioning = t_emb[:, None, :]
-        if l_emb is not None:
-            conditioning += l_emb[:, None, :]
+        num_heads = self.config.num_heads
+        dropout_rate = self.config.dropout_rate
 
-        # --- 2. Conditioned Attention ---
-        # Add the conditioning vector to the input before the attention mechanism.
-        # The residual connection is still made from the original, unconditioned input.
+        # --- 1. Conditioning ---
+        # Same logic as before: add time and context embeddings
+        # We apply this *before* the first normalization
+        
+        conditioning = jnp.zeros_like(inputs)
+        if t_emb is not None:
+            conditioning += t_emb[:, None, :]
+        if c_emb is not None:
+            conditioning += c_emb[:, None, :]
+    
         conditioned_inputs = inputs + conditioning
-        x = nn.MultiHeadDotProductAttention(
-            num_heads = num_heads,
-            dropout_rate=dropout_rate,
-            deterministic=deterministic
-        )(conditioned_inputs, mask = masks[:, None, None, :],  dropout_rng = dropout_rng) + inputs
+        attn_mask = masks[:, None, None, :] if masks is not None else None
 
-        x = nn.LayerNorm()(x)
-        x = FeedForward(config)(x)
-        output = nn.LayerNorm()(x)
+        attn_rng, ff_rng = jax.random.split(dropout_rng) if dropout_rng is not None else (None, None)
+        #normed_inputs = SetLayerNorm()(conditioned_inputs, mask=masks)
+        normed_inputs = nn.LayerNorm()(conditioned_inputs)
+        attn_output = nn.MultiHeadDotProductAttention(
+            num_heads=num_heads,
+            dropout_rate=dropout_rate
+        )(
+            normed_inputs, 
+            mask=attn_mask, 
+            deterministic=deterministic,
+            dropout_rng=attn_rng
+        )
+        
+        x = inputs + attn_output
+        #normed_x = SetLayerNorm()(x, mask=masks)
+        normed_x = nn.LayerNorm()(x)
+        ff_output = FeedForward(config=self.config)(normed_x, deterministic=deterministic, dropout_rng=ff_rng)
+        output = x + ff_output
+        
         return output
 
 class AttentionNN(nn.Module):
     """
     Main attention network, modified to pass conditioning to each EncoderBlock.
     """
-    config: DefaultConfig
+    config: WassersteinFlowMatchingConfig
 
     @nn.compact
     def __call__(self, point_cloud, t, masks = None, labels = None, deterministic = True, dropout_rng=random.key(0)):
@@ -110,13 +125,14 @@ class AttentionNN(nn.Module):
         x = x_emb
         # In each layer, re-introduce the time and label embeddings.
         for _ in range(num_layers):
+            dropout_rng, layer_dropout_rng = random.split(dropout_rng)
             x = EncoderBlock(config)(
                 inputs=x, 
                 t_emb=t_emb, 
                 l_emb=l_emb, 
                 masks=masks, 
                 deterministic=deterministic, 
-                dropout_rng=dropout_rng
+                dropout_rng=layer_dropout_rng
             )   
         
         # --- 4. Final Output Layer ---

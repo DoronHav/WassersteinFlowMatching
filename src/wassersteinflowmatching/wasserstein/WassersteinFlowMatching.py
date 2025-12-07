@@ -14,7 +14,7 @@ import pickle # type: ignore
 import wassersteinflowmatching.wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.wasserstein.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Transformer import AttentionNN # type: ignore
-from wassersteinflowmatching.wasserstein.DefaultConfig import DefaultConfig # type: ignore
+from wassersteinflowmatching.wasserstein.DefaultConfig import WassersteinFlowMatchingConfig # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
 import wandb
@@ -37,21 +37,29 @@ class WassersteinFlowMatching:
         labels = None,
         noise_point_clouds = None,
         matched_noise = False,
-        config = DefaultConfig,
+        config = WassersteinFlowMatchingConfig,
         key = random.key(0),
         use_wandb = True,
         **kwargs,
     ):
 
 
+        print(config)
     
         print("Initializing Wasserstein Flow Matching")
 
-        self.config = config
+        # Instantiate config if it's a class type
+        if isinstance(config, type):
+            config = config()
 
+        if config is None:
+            config = WassersteinFlowMatchingConfig()
         if kwargs:
             config = config.replace(**kwargs)
-        
+
+
+        self.config = config
+
         self.scaling = self.config.scaling
         self.scaling_factor = self.config.scaling_factor
 

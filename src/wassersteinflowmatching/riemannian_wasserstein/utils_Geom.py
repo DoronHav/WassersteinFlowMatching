@@ -20,7 +20,7 @@ class torus:
         )
         
         # Return geodesic distance on n-torus
-        return jnp.sqrt(jnp.sum(diff**2))
+        return jnp.sum(diff**2)
 
     def distance_matrix(self, P0, P1):
         # Normalize angles to [0, 2π)
@@ -34,7 +34,7 @@ class torus:
         )
         
         # Return matrix of distances
-        return jnp.sqrt(jnp.sum(diff**2, axis=-1))
+        return jnp.sum(diff**2, axis=-1)
 
     def velocity(self, P0, P1, t):
         """
@@ -75,7 +75,43 @@ class torus:
         """
         log = self.velocity(P0, P1, 0)
         return self.exponential_map(P0, log, t)
-
+    
+    def weighted_mean(self, points, weights):
+        """
+        Computes the weighted Fréchet mean on the torus using circular statistics.
+        
+        It maps angles to unit vectors, averages the vectors, and maps back to angles.
+        This respects the periodicity (e.g., mean of 0.1 and 2π-0.1 is 0, not π).
+        
+        Args:
+            points: Array of shape (n, d) containing points on the torus [0, 2π]
+            weights: Array of shape (n,) containing weights for each point
+            
+        Returns:
+            Weighted mean point projected onto the torus in range [0, 2π]
+        """
+        # 1. Normalize weights to sum to 1
+        # Shape: (n,) -> (n, 1) for broadcasting against (n, d) points
+        weights = weights / (jnp.sum(weights) + 1e-9)
+        weights_expanded = weights[:, None] 
+        
+        # 2. Convert angles to unit vectors (phasors)
+        # We process each dimension d independently as S^1
+        sin_components = jnp.sin(points)
+        cos_components = jnp.cos(points)
+        
+        # 3. Compute weighted center of mass for the vectors
+        # Result shape: (d,)
+        mean_sin = jnp.sum(sin_components * weights_expanded, axis=0)
+        mean_cos = jnp.sum(cos_components * weights_expanded, axis=0)
+        
+        # 4. Recover the mean angle using arctan2
+        # arctan2 returns values in [-π, π]
+        mean_angles = jnp.arctan2(mean_sin, mean_cos)
+        
+        # 5. Project back to [0, 2π] geometry
+        return self.project_to_geometry(mean_angles)
+    
 class sphere:
     def project_to_geometry(self, P):
         # Normalize bath of points P to ensure it is on the sphere Sd
@@ -94,7 +130,7 @@ class sphere:
         dot_product = jnp.clip(dot_product, -1.0, 1.0)
         
         # Compute the great circle distance (angular distance)
-        return jnp.arccos(dot_product)
+        return jnp.arccos(dot_product)**2
 
     def distance_matrix(self, P0, P1):
         # Normalize the points to ensure they are on the sphere S2
@@ -108,7 +144,7 @@ class sphere:
         dot_product_matrix = jnp.clip(dot_product_matrix, -1.0, 1.0)
         
         # Compute the great circle distance matrix
-        return jnp.arccos(dot_product_matrix)
+        return jnp.arccos(dot_product_matrix)**2
 
     def interpolant(self, P0, P1, t):
         # Normalize P0 and P1 to ensure they are on the sphere S2
@@ -212,6 +248,26 @@ class sphere:
         new_p = jnp.where(v_norm < 1e-6, small_step(), general_step())
         
         return new_p
+    
+    def weighted_mean(self, points, weights):
+        """
+        Compute weighted mean on the sphere using Euclidean mean followed by projection.
+        
+        Args:
+            points: Array of shape (n, d) containing points on the sphere
+            weights: Array of shape (n,) containing weights for each point
+            
+        Returns:
+            Weighted mean point projected onto the sphere
+        """
+        # Normalize weights
+        weights = weights / (jnp.sum(weights) + 1e-9)
+        
+        # Compute weighted Euclidean mean
+        euclidean_mean = jnp.sum(points * weights[:, None], axis=0)
+        
+        # Project back onto sphere (normalize to unit length)
+        return self.project_to_geometry(euclidean_mean)
 
 class hyperbolic:
     def project_to_geometry(self, P):
@@ -486,3 +542,23 @@ class hyperbolic:
         
         # Compute the logarithmic map
         return 2 * lambda_p * jnp.arctanh(diff_norm) * mobius_diff / diff_norm
+    
+    def weighted_mean(self, points, weights):
+        """
+        Compute weighted mean in hyperbolic space using Euclidean mean followed by projection.
+        
+        Args:
+            points: Array of shape (n, d) containing points in the Poincaré ball
+            weights: Array of shape (n,) containing weights for each point
+            
+        Returns:
+            Weighted mean point projected onto the Poincaré ball
+        """
+        # Normalize weights
+        weights = weights / (jnp.sum(weights) + 1e-9)
+        
+        # Compute weighted Euclidean mean
+        euclidean_mean = jnp.sum(points * weights[:, None], axis=0)
+        
+        # Project back onto Poincaré ball (ensure norm < 1)
+        return self.project_to_geometry(euclidean_mean)
