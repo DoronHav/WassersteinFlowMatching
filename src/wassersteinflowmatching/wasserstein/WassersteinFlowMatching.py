@@ -17,6 +17,7 @@ from wassersteinflowmatching.wasserstein._utils_Transformer import AttentionNN #
 from wassersteinflowmatching.wasserstein.DefaultConfig import DefaultConfig # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
+import wandb
 
 
 class WassersteinFlowMatching:
@@ -38,6 +39,7 @@ class WassersteinFlowMatching:
         matched_noise = False,
         config = DefaultConfig,
         key = random.key(0),
+        use_wandb = True,
         **kwargs,
     ):
 
@@ -223,6 +225,15 @@ class WassersteinFlowMatching:
         
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
+        self.use_wandb = use_wandb
+        if self.use_wandb:
+            # Initialize wandb if not already initialized
+            if not wandb.run:
+                wandb.init(
+                    project="pascientflow",
+                    name="WFM_jax_pc"
+                )
+
     def scale_func(self, point_clouds):
         """
         :meta private:
@@ -405,6 +416,7 @@ class WassersteinFlowMatching:
         source_sample = None,
         saved_state = None,
         key=random.key(0),
+        log_every=20,  # Add this parameter
     ):
         """
         Set up optimization parameters and train the ENVI moodel
@@ -479,6 +491,15 @@ class WassersteinFlowMatching:
 
             self.params = self.state.params
             self.losses.append(loss) 
+
+            # Log to wandb every log_every steps
+            if self.use_wandb and (training_step+1) % log_every == 0:
+                wandb.log({
+                    "train_loss": float(loss),
+                    #"step": current_step,
+                    "trainer/global_step": training_step,
+                    "learning_rate": float(self.state.opt_state[1].hyperparams['learning_rate']) if hasattr(self.state.opt_state[1], 'hyperparams') else learning_rate
+                })
 
             if(training_step % verbose == 0):
                 tq.set_description(": {:.3e}".format(loss))
