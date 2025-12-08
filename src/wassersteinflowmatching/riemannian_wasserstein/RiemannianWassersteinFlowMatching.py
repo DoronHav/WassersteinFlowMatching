@@ -171,6 +171,7 @@ class RiemannianWassersteinFlowMatching:
         else:
             self.conditioning = None
             self.conditioning_dim = -1
+            self.cfg = False  # No CFG when there's no conditioning
 
     
         if(self.mini_batch_ot_mode):

@@ -3,11 +3,12 @@ name = "wassersteinflowmatching"
 version = "0.1.0"
 description = "Flow Matching for point clouds"
 authors = [
-    {name = "Doron Haviv"}
+    {name = "Doron Haviv"},
+    {name = "Edward De Brouwer"}
 ]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "flax>=0.10.6",
     "ott-jax>=0.4.9",
@@ -17,8 +18,17 @@ dependencies = [
     "scanpy>=1.11.2",
     "wandb>=0.21.1",
     "jax[cuda12]>=0.6.2",
+    "pascientloaders>=0.2.6",
+    "scikit-image>=0.25.2",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+pascientloaders = { index = "roche-pypi" }
+
+[[tool.uv.index]]
+name = "roche-pypi"
+url = "https://pypi.cedar.roche.com/simple/"
