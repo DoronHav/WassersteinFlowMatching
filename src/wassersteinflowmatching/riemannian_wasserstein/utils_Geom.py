@@ -1,11 +1,41 @@
 import jax.numpy as jnp # type: ignore
 
 
+class euclidean:
+    def project_to_geometry(self, P, use_cpu=False):
+        return P
+
+    def distance(self, P0, P1):
+        return jnp.sum((P0 - P1)**2)
+
+    def distance_matrix(self, P0, P1):
+        return jnp.sum((P0[:, None, :] - P1[None, :, :])**2, axis=-1)
+
+    def velocity(self, P0, P1, t):
+        return P1 - P0
+
+    def tangent_norm(self, v, w, p):
+        return jnp.mean(jnp.square(v - w))
+
+    def exponential_map(self, p, v, delta_t):
+        return p + v * delta_t
+
+    def interpolant(self, P0, P1, t):
+        return (1 - t) * P0 + t * P1
+    
+    def weighted_mean(self, points, weights):
+        weights = weights / (jnp.sum(weights) + 1e-9)
+        return jnp.sum(points * weights[:, None], axis=0)
+
+
 class torus:
 
-    def project_to_geometry(self, P):
+    def project_to_geometry(self, P, use_cpu=False):
         # For n-dimensional torus, points are represented as n angles
         # Project by taking modulo 2π for all angles
+        if use_cpu:
+            import numpy as np
+            return np.mod(P, 2 * np.pi)
         return jnp.mod(P, 2 * jnp.pi)
 
     def distance(self, P0, P1):
@@ -113,8 +143,11 @@ class torus:
         return self.project_to_geometry(mean_angles)
     
 class sphere:
-    def project_to_geometry(self, P):
+    def project_to_geometry(self, P, use_cpu=False):
         # Normalize bath of points P to ensure it is on the sphere Sd
+        if use_cpu:
+            import numpy as np
+            return np.nan_to_num(P /  np.linalg.norm(P, axis=-1, keepdims=True), nan = 1/np.sqrt(P.shape[-1]))
         return jnp.nan_to_num(P /  jnp.linalg.norm(P, axis=-1, keepdims=True), nan = 1/jnp.sqrt(P.shape[-1]))
 
 
@@ -270,295 +303,206 @@ class sphere:
         return self.project_to_geometry(euclidean_mean)
 
 class hyperbolic:
-    def project_to_geometry(self, P):
-        # Project points to ensure they lie within the Poincaré ball
-        # Normalize points that lie outside the unit ball
-        norm = jnp.linalg.norm(P, axis=-1, keepdims=True)
-        return jnp.where(norm >= 1.0, P / (norm + 1e-5), P)
+    """
+    Implements Hyperbolic geometry using the Lorentz (Hyperboloid) model.
+    Points are represented in R^(d+1) such that <x, x>_L = -1 and x[0] > 0.
+    """
+    
 
-    def mobius_addition(self, x, y):
-        """
-        Möbius addition in the Poincaré ball model.
-        Formula: (1 + 2<x,y> + |y|²)x + (1 - |x|²)y / (1 + 2<x,y> + |x|²|y|²)
-        """
-        x_norm_sq = jnp.sum(x**2)
-        y_norm_sq = jnp.sum(y**2)
-        dot_prod = jnp.dot(x, y)
-        numerator = (1 + 2*dot_prod + y_norm_sq)*x + (1 - x_norm_sq)*y
-        denominator = 1 + 2*dot_prod + x_norm_sq*y_norm_sq
-        return numerator / denominator
+    def _minkowski_dot(self, x, y):
+        """Internal helper for Minkowski inner product: -x0*y0 + x1*y1 + ..."""
+        # We assume the 0-th index is the 'time' component with negative signature
+        res = -x[..., 0] * y[..., 0] + jnp.sum(x[..., 1:] * y[..., 1:], axis=-1)
+        return res
 
-    def mobius_addition_batch(self, x, y):
+    def project_to_geometry(self, P, use_cpu=False):
         """
-        Vectorized Möbius addition for batches of points.
-        x: shape (n, d) or (d,)
-        y: shape (m, d) or (d,)
-        Returns: shape (n, m, d) or (n, d) depending on input shapes
+        Project points onto the upper sheet of the hyperboloid.
+        Method: Normalize by Minkowski norm, then flip sign if on lower sheet.
         """
-        # Add batch dimensions if needed
-        if x.ndim == 1:
-            x = x[None, :]
-        if y.ndim == 1:
-            y = y[None, :]
+        if use_cpu:
+            import numpy as np
+            # Calculate Minkowski squared norm: <P, P>_L
+            # Inline _minkowski_dot for numpy
+            sq_norm = -P[..., 0] * P[..., 0] + np.sum(P[..., 1:] * P[..., 1:], axis=-1)
+            
+            # Avoid division by zero or sqrt of positive numbers (spacelike vectors)
+            # We clamp to ensure we are treating it as timelike
+            scale = np.sqrt(np.abs(sq_norm))
+            P_proj = P / (scale[..., None] + 1e-9)
+            
+            # Ensure we are on the upper sheet (x0 > 0)
+            # If x0 < 0, flip the whole vector (antipodal symmetry on the hyperboloid)
+            P_proj = np.where(P_proj[..., 0:1] < 0, -P_proj, P_proj)
+            
+            return P_proj
+
+        # Calculate Minkowski squared norm: <P, P>_L
+        sq_norm = self._minkowski_dot(P, P)
         
-        # Reshape for broadcasting
-        x = x[:, None, :]  # (n, 1, d)
-        y = y[None, :, :]  # (1, m, d)
+        # Avoid division by zero or sqrt of positive numbers (spacelike vectors)
+        # We clamp to ensure we are treating it as timelike
+        scale = jnp.sqrt(jnp.abs(sq_norm))
+        P_proj = P / (scale[..., None] + 1e-9)
         
-        # Compute norms and dot products
-        x_norm_sq = jnp.sum(x**2, axis=-1, keepdims=True)  # (n, 1, 1)
-        y_norm_sq = jnp.sum(y**2, axis=-1, keepdims=True)  # (1, m, 1)
-        dot_prod = jnp.sum(x * y, axis=-1, keepdims=True)  # (n, m, 1)
+        # Ensure we are on the upper sheet (x0 > 0)
+        # If x0 < 0, flip the whole vector (antipodal symmetry on the hyperboloid)
+        P_proj = jnp.where(P_proj[..., 0:1] < 0, -P_proj, P_proj)
         
-        # Compute Möbius addition
-        numerator = (1 + 2*dot_prod + y_norm_sq)*x + (1 - x_norm_sq)*y
-        denominator = 1 + 2*dot_prod + x_norm_sq*y_norm_sq
-        
-        return numerator / denominator
+        return P_proj
 
     def distance(self, P0, P1):
-        """
-        Compute the hyperbolic distance between two points in the Poincaré ball.
-        Formula: d(x,y) = 2 * arctanh(|(-x) ⊕ y|)
-        """
-        # Project points to ensure they're in the unit ball
         P0 = self.project_to_geometry(P0)
         P1 = self.project_to_geometry(P1)
         
-        # Compute the Möbius addition of -P0 and P1
-        minus_p0 = -P0
-        mobius_sum = self.mobius_addition(minus_p0, P1)
+        # Hyperbolic distance formula: arccosh(-<x, y>_L)
+        inner_prod = self._minkowski_dot(P0, P1)
         
-        # Compute the norm of the result
-        norm = jnp.linalg.norm(mobius_sum)
+        # Clamp for numerical stability: inner product must be <= -1
+        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
         
-        # Clip to avoid numerical issues
-        norm = jnp.clip(norm, 0.0, 1.0 - 1e-5)
-        
-        # Return the hyperbolic distance
-        return 2 * jnp.arctanh(norm)
+        return jnp.arccosh(-inner_prod)**2
 
     def distance_matrix(self, P0, P1):
-        """
-        Compute pairwise hyperbolic distances between two sets of points.
-        P0: shape (n, d)
-        P1: shape (m, d)
-        Returns: shape (n, m)
-        """
-        # Project points to ensure they're in the unit ball
         P0 = self.project_to_geometry(P0)
         P1 = self.project_to_geometry(P1)
         
-        # Compute the Möbius addition of -P0 and P1 for all pairs
-        minus_P0 = -P0
-        mobius_sums = self.mobius_addition_batch(minus_P0, P1)  # shape (n, m, d)
+        # Vectorized Minkowski Product
+        # <P0, P1>_L = -P0_0*P1_0^T + P0_space @ P1_space^T
+        term_time = -jnp.outer(P0[:, 0], P1[:, 0])
+        term_space = P0[:, 1:] @ P1[:, 1:].T
+        inner_prod_mat = term_time + term_space
         
-        # Compute the norms of the results
-        norms = jnp.linalg.norm(mobius_sums, axis=-1)  # shape (n, m)
-        
-        # Clip to avoid numerical issues
-        norms = jnp.clip(norms, 0.0, 1.0 - 1e-5)
-        
-        # Return the hyperbolic distances
-        return 2 * jnp.arctanh(norms)
+        inner_prod_mat = jnp.minimum(inner_prod_mat, -1.0 + 1e-7)
+        return jnp.arccosh(-inner_prod_mat)**2
 
     def interpolant(self, P0, P1, t):
         """
-        Compute geodesic interpolation in the Poincaré ball.
-        This is the geodesic from P0 to P1 at time t.
+        Hyperbolic Linear Interpolation (analogue to SLERP on sphere).
         """
-        # Project points to ensure they're in the unit ball
         P0 = self.project_to_geometry(P0)
         P1 = self.project_to_geometry(P1)
         
-        # If points are very close, return linear interpolation
-        if jnp.allclose(P0, P1):
-            return (1 - t) * P0 + t * P1
+        # Cosine rule analogue: <P0, P1>_L = -cosh(dist)
+        inner_prod = self._minkowski_dot(P0, P1)
+        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
         
+        # The distance (angle) between points
+        omega = jnp.arccosh(-inner_prod)
         
-        # Compute the geodesic
-        P0_norm = jnp.linalg.norm(P0)
-        P1_norm = jnp.linalg.norm(P1)
+        sinh_omega = jnp.sinh(omega)
         
-        # Handle special cases
-        if P0_norm < 1e-6:  # P0 is near origin
-            return t * P1
-        if P1_norm < 1e-6:  # P1 is near origin
-            return (1 - t) * P0
-            
-        # General case: compute the geodesic using the exponential map
-        initial_velocity = self.log_map(P0, P1)
-        return self.exponential_map(P0, initial_velocity, t)
+        # Handle case where points are effectively identical (omega ~ 0)
+        # Standard SLERP formula adapted with sinh instead of sin
+        a = jnp.where(sinh_omega < 1e-6, 1.0 - t, jnp.sinh((1 - t) * omega) / sinh_omega)
+        b = jnp.where(sinh_omega < 1e-6, t, jnp.sinh(t * omega) / sinh_omega)
+        
+        # Reshape for broadcasting
+        a = a[..., None]
+        b = b[..., None]
+        
+        return a * P0 + b * P1
 
     def velocity(self, P0, P1, t):
         """
-        Compute the velocity vector at time t along the geodesic from P0 to P1.
-        
-        Args:
-            P0: Starting point in the Poincaré ball
-            P1: Ending point in the Poincaré ball
-            t: Time parameter in [0,1]
-            
-        Returns:
-            Velocity vector at the point gamma(t) where gamma is the geodesic from P0 to P1
+        Analytical derivative of the interpolant with respect to t.
         """
-        # Project points to ensure they're in the unit ball
         P0 = self.project_to_geometry(P0)
         P1 = self.project_to_geometry(P1)
         
-        # If points are very close, return zero velocity
-        if jnp.allclose(P0, P1):
-            return jnp.zeros_like(P0)
+        inner_prod = self._minkowski_dot(P0, P1)
+        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
         
-        # Compute the initial velocity using the log map
-        initial_velocity = self.log_map(P0, P1)
+        omega = jnp.arccosh(-inner_prod)
+        sinh_omega = jnp.sinh(omega)
         
-        # Get the point at time t along the geodesic
-        Pt = self.interpolant(P0, P1, t)
+        # Derivative of the sinh coefficients
+        # d/dt [sinh((1-t)w)/sinh(w)] = -w * cosh((1-t)w)/sinh(w)
+        # d/dt [sinh(tw)/sinh(w)]     =  w * cosh(tw)/sinh(w)
         
-        # Compute the conformal factors
-        lambda_P0 = 2 / (1 - jnp.sum(P0**2))
-        lambda_Pt = 2 / (1 - jnp.sum(Pt**2))
+        # term a derivative
+        da = jnp.where(sinh_omega < 1e-6, -1.0, -omega * jnp.cosh((1 - t) * omega) / sinh_omega)
+        # term b derivative
+        db = jnp.where(sinh_omega < 1e-6, 1.0, omega * jnp.cosh(t * omega) / sinh_omega)
         
-        # Compute the parallel transport from P0 to Pt
-        # First, get the squared norms
-        P0_norm_sq = jnp.sum(P0**2)
-        Pt_norm_sq = jnp.sum(Pt**2)
+        da = da[..., None]
+        db = db[..., None]
         
-        # Compute the inner product
-        inner_prod = jnp.sum(P0 * Pt)
-        
-        # Compute the parallel transport scaling factor
-        # This accounts for the change in the metric tensor along the geodesic
-        scaling = lambda_P0 / lambda_Pt * (
-            (1 - P0_norm_sq) / (1 - Pt_norm_sq) * 
-            (1 + 2 * inner_prod + Pt_norm_sq) / 
-            (1 + 2 * inner_prod + P0_norm_sq)
-        )
-        
-        # For numerical stability, clip the scaling factor
-        scaling = jnp.clip(scaling, 1e-6, 1e6)
-        
-        # Parallel transport the initial velocity to Pt
-        transported_velocity = scaling * initial_velocity
-        
-        # Project the transported velocity onto the tangent space at Pt
-        # This ensures the velocity remains tangent to the manifold
-        Pt_component = jnp.sum(transported_velocity * Pt) * Pt
-        tangent_velocity = transported_velocity - Pt_component
-        
-        return tangent_velocity
+        return da * P0 + db * P1
 
     def tangent_norm(self, v, w, p):
         """
-        Compute the norm of the difference between two tangent vectors v and w at point x
-        in the Poincaré ball model.
-        
-        Args:
-            v: First tangent vector
-            w: Second tangent vector
-            x: Base point in the Poincaré ball where these vectors are tangent
-            
-        Returns:
-            The squared norm of the difference between the tangent vectors
-            under the hyperbolic metric
+        Norm in the tangent space at point p.
+        The tangent space T_p H is the set of vectors orthogonal to p under Minkowski metric.
+        However, the restriction of the Minkowski metric to T_p H is POSITIVE DEFINITE.
+        So this looks like a standard Euclidean squared norm, but computed using Minkowski dot.
         """
-        # Project base point to ensure it's in the unit ball
+        # First, ensure v and w are tangent to p
+        # Project vector u onto tangent space: u_tan = u + <u, p>_L * p
+        # (Note the plus sign because <p,p>_L = -1)
+        
         p = self.project_to_geometry(p)
         
-        # Ensure vectors are tangent by projecting out radial components
-        p_norm_sq = jnp.sum(p**2)
+        v_dot_p = self._minkowski_dot(v, p)[..., None]
+        w_dot_p = self._minkowski_dot(w, p)[..., None]
         
-        # Project v onto tangent space at x
-        v_dot_p = jnp.sum(v * p)
-        v_tangent = v - (v_dot_p * p)
+        v_tan = v + v_dot_p * p
+        w_tan = w + w_dot_p * p
         
-        # Project w onto tangent space at x
-        w_dot_p = jnp.sum(w * p)
-        w_tangent = w - (w_dot_p * p)
+        diff = v_tan - w_tan
         
-        # Compute the difference between the tangent vectors
-        diff = v_tangent - w_tangent
-        
-        # Compute the conformal factor (hyperbolic metric tensor)
-        # In the Poincaré ball, the metric tensor is scaled by lambda_x^2
-        lambda_p = 2 / (1 - p_norm_sq)
-        
-        # Compute the squared norm under the hyperbolic metric
-        # ||v||^2 = <v,v>_x = λ_x^2 <v,v>_euclidean
-        return lambda_p**2 * jnp.sum(diff**2)
-    
-    def exponential_map(self, p, v, delta_t=1.0):
-        """
-        Compute the exponential map in the Poincaré ball.
-        Maps a tangent vector v at point p to a point in the manifold.
-        """
-        # Project p to ensure it's in the unit ball
-        p = self.project_to_geometry(p)
-        
-        # Compute the norm of v
-        v_norm = jnp.linalg.norm(v)
-        
-        # If v is very small, return p
-        if v_norm < 1e-6:
-            return p
-        
-        # Compute the conformal factor
-        lambda_p = 2 / (1 - jnp.sum(p**2))
-        
-        # Scale the vector by delta_t
-        v = v * delta_t
-        
-        # Compute the exponential map
-        v_norm = jnp.linalg.norm(v)
-        coef = jnp.tanh(v_norm / (2 * lambda_p)) / v_norm
-        
-        # Return the result
-        result = self.mobius_addition(p, coef * v)
-        return self.project_to_geometry(result)
+        # The norm squared of a tangent vector is <diff, diff>_L
+        # Since it's tangent, this value will be positive.
+        return jnp.mean(self._minkowski_dot(diff, diff))
 
-    def log_map(self, p, q):
+    def exponential_map(self, p, v, delta_t):
         """
-        Compute the logarithmic map in the Poincaré ball.
-        Maps a point q to a tangent vector at point p.
+        Hyperbolic Exponential Map.
+        Moves point p in direction v by time delta_t.
         """
-        # Project points to ensure they're in the unit ball
         p = self.project_to_geometry(p)
-        q = self.project_to_geometry(q)
         
-        # If points are very close, return zero vector
-        if jnp.allclose(p, q):
-            return jnp.zeros_like(p)
+        # Project v to tangent space to be safe
+        v_dot_p = self._minkowski_dot(v, p)[..., None]
+        v = v + v_dot_p * p
         
-        # Compute the Möbius addition of -p and q
-        minus_p = -p
-        mobius_diff = self.mobius_addition(minus_p, q)
+        # Calculate Minkowski norm of velocity vector
+        # For tangent vectors, <v, v>_L >= 0
+        v_sq_norm = self._minkowski_dot(v, v)
+        v_norm = jnp.sqrt(jnp.maximum(v_sq_norm, 0.0))
         
-        # Compute the norm of the difference
-        diff_norm = jnp.linalg.norm(mobius_diff)
+        # Formula: p * cosh(norm * t) + (v/norm) * sinh(norm * t)
         
-        # Compute the conformal factor
-        lambda_p = 2 / (1 - jnp.sum(p**2))
-        
-        # Compute the logarithmic map
-        return 2 * lambda_p * jnp.arctanh(diff_norm) * mobius_diff / diff_norm
-    
+        def small_step():
+             # Approximation for small velocity
+             step = p + v * delta_t
+             return self.project_to_geometry(step)
+
+        def general_step():
+            norm_val = v_norm * delta_t
+            # Reshape for broadcasting
+            cosh_term = jnp.cosh(norm_val)[..., None]
+            sinh_term = jnp.sinh(norm_val)[..., None]
+            
+            # v / v_norm term (handle div by zero safely)
+            direction = v / (v_norm[..., None] + 1e-9)
+            
+            return p * cosh_term + direction * sinh_term
+
+        # Select based on velocity magnitude
+        res = jnp.where(v_norm[..., None] < 1e-6, small_step(), general_step())
+        return res
+
     def weighted_mean(self, points, weights):
         """
-        Compute weighted mean in hyperbolic space using Euclidean mean followed by projection.
-        
-        Args:
-            points: Array of shape (n, d) containing points in the Poincaré ball
-            weights: Array of shape (n,) containing weights for each point
-            
-        Returns:
-            Weighted mean point projected onto the Poincaré ball
+        Lorentz Centroid.
+        1. Compute weighted sum in embedding space R^(d+1).
+        2. Project result back to Hyperboloid.
         """
-        # Normalize weights
         weights = weights / (jnp.sum(weights) + 1e-9)
         
-        # Compute weighted Euclidean mean
-        euclidean_mean = jnp.sum(points * weights[:, None], axis=0)
+        # Linear sum in embedding space
+        linear_mean = jnp.sum(points * weights[:, None], axis=0)
         
-        # Project back onto Poincaré ball (ensure norm < 1)
-        return self.project_to_geometry(euclidean_mean)
+        # Project back to manifold
+        return self.project_to_geometry(linear_mean)

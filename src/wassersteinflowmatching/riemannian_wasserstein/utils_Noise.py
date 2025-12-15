@@ -431,11 +431,14 @@ def get_noise_functions(geom, noise_type, projection_func=None):
         elif geom == 'hyperbolic':
             noise_func = hyperbolic_intrinsic_gaussian
             param_estimator = estimate_hyperbolic_intrinsic_gaussian_params
+        elif(geom == 'euclidean'):
+            noise_func = euclidean_gaussian_noise
+            param_estimator = estimate_euclidean_gaussian_params
         else:
             raise ValueError(f"Unsupported geometry for intrinsic Gaussian: {geom}")
             
     elif noise_type == 'ambient_gaussian':
-        if geom in ['sphere', 'hyperbolic']:
+        if geom in ['sphere', 'hyperbolic', 'euclidean']:
             if projection_func is None:
                 raise ValueError("projection_func must be provided for ambient_gaussian on sphere/hyperbolic")
             raw_noise_func = euclidean_gaussian_noise
