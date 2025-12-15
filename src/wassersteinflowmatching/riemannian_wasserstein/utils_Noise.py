@@ -176,6 +176,8 @@ def hyperbolic_gaussian_noise(size, noise_config, key):
 
 def estimate_euclidean_gaussian_params(point_clouds, weights=None):
     """Estimate Gaussian parameters from data in Euclidean space."""
+    print("Estimating Euclidean Gaussian parameters...")
+
     if weights is None:
         weights = jnp.ones(point_clouds.shape[:2])
     
@@ -190,7 +192,6 @@ def estimate_euclidean_gaussian_params(point_clouds, weights=None):
     point_clouds_cov = jnp.einsum('bij,bik,bi->bjk', centered_pc, centered_pc, normalized_weights)
 
     cov_chol = jax.vmap(jnp.linalg.cholesky)(point_clouds_cov + jnp.eye(point_clouds_cov.shape[-1]) * 1e-5)
-    
     return {
         'mean': jnp.mean(point_clouds_mean, axis=0),
         'cov_chol_mean': jnp.mean(cov_chol, axis=0),

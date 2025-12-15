@@ -20,6 +20,7 @@ dependencies = [
     "jax[cuda12]>=0.6.2",
     "pascientloaders>=0.2.6",
     "scikit-image>=0.25.2",
+    "ipykernel>=7.1.0",
 ]
 
 [build-system]
