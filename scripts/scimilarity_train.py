@@ -2,8 +2,12 @@
 """
 Riemannian Wasserstein Flow Matching on Scimilarity Point Clouds
 
-This script demonstrates how to run RWFM for point-cloud generation on spherical manifolds
-using the spherical MNIST dataset.
+This script demonstrates how to run RWFM for point-cloud generation on the Scimilarity manifold.
+
+usage: uv run python scimilarity_train.py
+
+The script loads all point clouds in memory so large memory jobs are required.
+The point clouds are batched on the fly to avoid additional memory overhead due to padding.
 """
 
 import os
@@ -88,11 +92,7 @@ def main():
     """Main execution function."""
 
     # Load and preprocess data
-    print("Generate data")
-    pc_train, pc_test = load_and_preprocess_mnist()
-    print(f"Training samples: {len(pc_train)}, Test samples: {len(pc_test)}")
-
-    max_files = 10  # For testing, limit number of files to load
+    max_files = 10000  # For testing, limit number of files to load
     data_dir = "/braid/cellm/2025Q1_scimilarity_embeddings/"
     split_path = "/braid/cellm/zarrs/2025Q1_sample/splits/split_v1.json"
     embedding_prefix = "emb"

@@ -24,8 +24,6 @@ from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import At
 from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
 from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
-#from wassersteinflowmatching.riemannian_wasserstein.utils_multi_gpu import replicate_state, prefetch_to_device # type: ignore
-
 from flax import jax_utils
 from torch.utils.data import DataLoader
 from typing import Union
