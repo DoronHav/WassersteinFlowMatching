@@ -135,60 +135,9 @@ def main():
         use_wandb=True,
         wandb_config = {"project": "WFM"}
     )
-
-
     
 
-    pc_train_processed = flow_model.point_clouds 
 
-    data_module = PascientDataLoader(
-        data_dir="/braid/cellm/zarrs/2025Q1_sample/",
-        gene_order_path="/braid/scimilarity/gene_order.tsv",
-        batch_size=16,
-        num_workers=8,
-        split_path="/braid/cellm/zarrs/2025Q1_sample/splits/split_v1.json",
-        sample_metadata_path="/braid/cellm/zarrs/2025Q1_sample/harmonized_sample_list.csv",
-        cell_metadata_paths=None,
-        cell_metadata_columns=None,
-        sample_metadata_columns=["tissue", "disease"],
-        in_mem=True,
-        return_sparse_tensor=True,
-        sparse_collate=False,
-        max_cells_per_sample=100,
-        sampling_strategy="random",
-        sampling_seed=42,
-    )
-    
-    # Setup data
-    data_module.setup()
-
-    train_dl = data_module.train_dataloader()
-    breakpoint()
-    
-    pc_train_loader = torch_loader(pc_train_processed, 
-                                  weights=flow_model.weights,
-                                  conditioning=None,
-                                  global_bs=32,
-                                  num_workers=8)
-
-
-    
-    flow_model.train_with_dl(
-            pc_train_loader,
-            training_steps=200000,
-            verbose=8,
-            learning_rate = 2e-4,
-            decay_steps = 1000,
-            saved_state=None,
-            key=random.key(0),
-            use_wandb=True,
-            wandb_config={"project": "WFM"},
-    )
-    
-    # Plot loss curve
-    loss_smooth = np.convolve(np.log(flow_model.losses), np.ones(100) / 100, mode='valid')
-    
-    breakpoint()
 
 
 
