@@ -66,10 +66,10 @@ class RiemannianWassersteinFlowMatching:
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
-        print("Projecting point clouds to geometry (cpu)...")
+        print("Projecting point clouds to geometry (with cpu)...")
         
 
-        self.point_clouds = [np.asarray(self.project_to_geometry(pc)) for pc in tqdm(point_clouds)]
+        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = True)) for pc in tqdm(point_clouds)]
 
 
         self.weights = [
@@ -149,7 +149,7 @@ class RiemannianWassersteinFlowMatching:
                                     (0, 0), 0)
         else:
             self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan, 
-                                    distance_matrix_func =  self.geom_utils.distance_matrix,
+                                    distance_matrix_func = self.geom_utils.distance_matrix,
                                     eps = self.config.wasserstein_eps, 
                                     lse_mode = self.config.wasserstein_lse, 
                                     num_iteration = self.config.num_sinkhorn_iters),

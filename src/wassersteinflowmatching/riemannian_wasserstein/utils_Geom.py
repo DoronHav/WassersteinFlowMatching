@@ -1,5 +1,5 @@
 import jax.numpy as jnp # type: ignore
-
+import numpy as np
 
 class euclidean:
     def project_to_geometry(self, P, use_cpu=False):
@@ -34,7 +34,6 @@ class torus:
         # For n-dimensional torus, points are represented as n angles
         # Project by taking modulo 2π for all angles
         if use_cpu:
-            import numpy as np
             return np.mod(P, 2 * np.pi)
         return jnp.mod(P, 2 * jnp.pi)
 
@@ -146,7 +145,6 @@ class sphere:
     def project_to_geometry(self, P, use_cpu=False):
         # Normalize bath of points P to ensure it is on the sphere Sd
         if use_cpu:
-            import numpy as np
             return np.nan_to_num(P /  np.linalg.norm(P, axis=-1, keepdims=True), nan = 1/np.sqrt(P.shape[-1]))
         return jnp.nan_to_num(P /  jnp.linalg.norm(P, axis=-1, keepdims=True), nan = 1/jnp.sqrt(P.shape[-1]))
 
@@ -321,33 +319,35 @@ class hyperbolic:
         Method: Normalize by Minkowski norm, then flip sign if on lower sheet.
         """
         if use_cpu:
-            import numpy as np
+  
             # Calculate Minkowski squared norm: <P, P>_L
             # Inline _minkowski_dot for numpy
-            sq_norm = -P[..., 0] * P[..., 0] + np.sum(P[..., 1:] * P[..., 1:], axis=-1)
+            x_space = P[..., 1:]
             
-            # Avoid division by zero or sqrt of positive numbers (spacelike vectors)
-            # We clamp to ensure we are treating it as timelike
-            scale = np.sqrt(np.abs(sq_norm))
-            P_proj = P / (scale[..., None] + 1e-9)
+            # 2. Calculate the squared norm of the spatial part
+            spatial_sq_norm = np.sum(x_space**2, axis=-1, keepdims=True)
             
-            # Ensure we are on the upper sheet (x0 > 0)
-            # If x0 < 0, flip the whole vector (antipodal symmetry on the hyperboloid)
-            P_proj = np.where(P_proj[..., 0:1] < 0, -P_proj, P_proj)
+            # 3. Solve for x0 such that -x0^2 + spatial_sq_norm = -1
+            # implies x0^2 = 1 + spatial_sq_norm
+            x0 = np.sqrt(1.0 + spatial_sq_norm)
+            
+            # 4. Reassemble the vector [x0, x_space]
+            P_proj = np.concatenate([x0, x_space], axis=-1)
             
             return P_proj
 
-        # Calculate Minkowski squared norm: <P, P>_L
-        sq_norm = self._minkowski_dot(P, P)
+    # 1. Extract the spatial components (everything after index 0)
+        x_space = P[..., 1:]
         
-        # Avoid division by zero or sqrt of positive numbers (spacelike vectors)
-        # We clamp to ensure we are treating it as timelike
-        scale = jnp.sqrt(jnp.abs(sq_norm))
-        P_proj = P / (scale[..., None] + 1e-9)
+        # 2. Calculate the squared norm of the spatial part
+        spatial_sq_norm = jnp.sum(x_space**2, axis=-1, keepdims=True)
         
-        # Ensure we are on the upper sheet (x0 > 0)
-        # If x0 < 0, flip the whole vector (antipodal symmetry on the hyperboloid)
-        P_proj = jnp.where(P_proj[..., 0:1] < 0, -P_proj, P_proj)
+        # 3. Solve for x0 such that -x0^2 + spatial_sq_norm = -1
+        # implies x0^2 = 1 + spatial_sq_norm
+        x0 = jnp.sqrt(1.0 + spatial_sq_norm)
+        
+        # 4. Reassemble the vector [x0, x_space]
+        P_proj = jnp.concatenate([x0, x_space], axis=-1)
         
         return P_proj
 
@@ -359,7 +359,7 @@ class hyperbolic:
         inner_prod = self._minkowski_dot(P0, P1)
         
         # Clamp for numerical stability: inner product must be <= -1
-        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
+        inner_prod = jnp.minimum(inner_prod, -1.0 - 1e-7)
         
         return jnp.arccosh(-inner_prod)**2
 
@@ -373,7 +373,7 @@ class hyperbolic:
         term_space = P0[:, 1:] @ P1[:, 1:].T
         inner_prod_mat = term_time + term_space
         
-        inner_prod_mat = jnp.minimum(inner_prod_mat, -1.0 + 1e-7)
+        inner_prod_mat = jnp.minimum(inner_prod_mat, -1.0 - 1e-7)
         return jnp.arccosh(-inner_prod_mat)**2
 
     def interpolant(self, P0, P1, t):
@@ -385,7 +385,7 @@ class hyperbolic:
         
         # Cosine rule analogue: <P0, P1>_L = -cosh(dist)
         inner_prod = self._minkowski_dot(P0, P1)
-        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
+        inner_prod = jnp.minimum(inner_prod, -1.0 - 1e-7)
         
         # The distance (angle) between points
         omega = jnp.arccosh(-inner_prod)
@@ -411,7 +411,7 @@ class hyperbolic:
         P1 = self.project_to_geometry(P1)
         
         inner_prod = self._minkowski_dot(P0, P1)
-        inner_prod = jnp.minimum(inner_prod, -1.0 + 1e-7)
+        inner_prod = jnp.minimum(inner_prod, -1.0 - 1e-7)
         
         omega = jnp.arccosh(-inner_prod)
         sinh_omega = jnp.sinh(omega)
