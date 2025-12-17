@@ -135,6 +135,108 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
     return int(recommended_iter)
 
 
+def auto_find_num_iter_matrix(distance_matrix, eps=0.01, lse_mode=True, sinkhorn_limit=5000, inner_iterations=10):
+    # distance_matrix shape: (Batch, N, N) or (N, N)
+    
+    # Ensure batch dimension
+    if distance_matrix.ndim == 2:
+        distance_matrix = distance_matrix[None, :, :]
+        
+    def solve_one(dist_mat):
+            geom = ott.geometry.geometry.Geometry(cost_matrix=dist_mat, epsilon=eps, scale_cost='max_cost')
+            out = linear.solve(
+            geom,
+            min_iterations=0, 
+            max_iterations=sinkhorn_limit,
+            inner_iterations=inner_iterations, 
+            lse_mode=lse_mode,
+        )
+            return out.errors
+
+    solve_batch = jax.jit(jax.vmap(solve_one))
+    errors = solve_batch(distance_matrix) # (Batch, Steps)
+
+    threshold = 1e-3
+    is_converged = (errors == -1) | ((errors > -1) & (errors < threshold))
+    
+    # Calculate convergence rate per column (time step)
+    convergence_rates = jnp.mean(is_converged.astype(float), axis=0)
+    
+    # Find the first index where rate >= 0.8
+    valid_indices = convergence_rates >= 0.8
+    
+    if not jnp.any(valid_indices):
+            print(f"WARNING: Convergence rate never reached 80% (Max rate: {jnp.max(convergence_rates):.2f}).")
+            return sinkhorn_limit
+
+    first_success_index = jnp.argmax(valid_indices)
+    recommended_iter = (first_success_index + 1) * inner_iterations
+    return int(recommended_iter)
+
+
+def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, noise_weights, ot_mat_jit, eps, lse_mode, num_batches=16, batch_size_ot=32, sample_size=2048, key=None):
+    if key is None:
+        key = random.key(0)
+    
+    subkey1, subkey2, key = random.split(key, 3)
+    
+    total_pc = num_batches * batch_size_ot
+    
+    # Sample real point clouds
+    idx = random.choice(subkey1, point_clouds.shape[0], shape=(total_pc,))
+    real_pcs = point_clouds[idx] 
+    real_weights = weights[idx]
+    
+    # Sample noise point clouds
+    idx_noise = random.choice(subkey2, noise_point_clouds.shape[0], shape=(total_pc,))
+    noise_pcs = noise_point_clouds[idx_noise]
+    noise_weights_batch = noise_weights[idx_noise]
+    
+    # Downsampling logic
+    current_n_points = point_clouds.shape[1]
+    if sample_size is not None and sample_size != current_n_points:
+        replace = current_n_points < sample_size
+        
+        def get_samples(pc, w, k):
+            # pc: (N, D), w: (N,)
+            idx = random.choice(k, pc.shape[0], shape=(sample_size,), replace=replace)
+            # Normalize weights
+            new_w = w[idx]
+            new_w = new_w / jnp.sum(new_w)
+            return pc[idx], new_w
+
+        key, subkey = random.split(key)
+        keys = random.split(subkey, total_pc)
+        real_pcs, real_weights = jax.vmap(get_samples)(real_pcs, real_weights, keys)
+        
+        key, subkey = random.split(key)
+        keys = random.split(subkey, total_pc)
+        noise_pcs, noise_weights_batch = jax.vmap(get_samples)(noise_pcs, noise_weights_batch, keys)
+
+    real_pcs_reshaped = real_pcs.reshape(num_batches, batch_size_ot, *real_pcs.shape[1:])
+    real_weights_reshaped = real_weights.reshape(num_batches, batch_size_ot, *real_weights.shape[1:])
+    noise_pcs_reshaped = noise_pcs.reshape(num_batches, batch_size_ot, *noise_pcs.shape[1:])
+    noise_weights_reshaped = noise_weights_batch.reshape(num_batches, batch_size_ot, *noise_weights_batch.shape[1:])
+
+    def compute_batch_op(operand):
+        pcs, p_w, ncs, n_w = operand
+        
+        def compute_row_op(i):
+            p_i = pcs[i]
+            w_i = p_w[i]
+            
+            p_batch = jnp.broadcast_to(p_i[None, ...], ncs.shape)
+            w_batch = jnp.broadcast_to(w_i[None, ...], n_w.shape)
+            
+            return ot_mat_jit([p_batch, w_batch], [ncs, n_w])
+            
+        return jax.lax.map(compute_row_op, jnp.arange(batch_size_ot))
+
+    D = jax.lax.map(compute_batch_op, (real_pcs_reshaped, real_weights_reshaped, noise_pcs_reshaped, noise_weights_reshaped))
+
+    return auto_find_num_iter_matrix(D, eps=eps, lse_mode=lse_mode)
+
+
 def get_assignments_sampling(P, key, pc_y=None):
     """
     Get assignments by sampling from the OT matrix rows.
@@ -245,7 +347,7 @@ def get_assignments_rounding(P, pc_y=None):
         return pc_y[assignments.astype(jnp.int32)], assignments
 
 
-def get_assignments_entropic(P, pc_y, weighted_mean_func):
+def get_assignments_barycentric(P, pc_y, weighted_mean_func):
     """
     Get assignments as the barycentric projection of source points.
     (JAX-compatible version)
@@ -275,6 +377,51 @@ def get_assignments_entropic(P, pc_y, weighted_mean_func):
     return barycenters, 0
 
 
+def get_assignments_entropic(P, pc_x, pc_y, log_map_func, exp_map_function):
+    """
+    Get assignments using entropic map estimation (tangent space averaging).
+    (JAX-compatible version)
+
+    For each source point x, computes the weighted average of log_x(y) for all y,
+    weighted by the transport plan P. Then maps back using exp_x.
+
+    Args:
+        P: The (padded) optimal transport matrix. Shape (N, M).
+        pc_x: The source point cloud coordinates. Shape (N, D).
+        pc_y: The target point cloud coordinates. Shape (M, D).
+        log_map_func: Function computing log map (velocity) between two points.
+                      Signature: log_map_func(p0, p1, t=0) -> velocity vector.
+        exp_map_function: Function computing exponential map.
+                          Signature: exp_map_function(p, v, t=1) -> point.
+
+    Returns:
+        An array of shape [P.shape[0], num_dims] representing the new
+        positions for each source point.
+    """
+    row_sums = jnp.sum(P, axis=1, keepdims=True)
+    P_normalized = P / (row_sums + 1e-9)
+
+    def process_single_point(x, weights):
+        # x: (D,)
+        # weights: (M,)
+        
+        # Compute velocities from x to all y in pc_y
+        # log_map_func(x, y, 0.0)
+        velocities = jax.vmap(lambda y: log_map_func(x, y, 0.0))(pc_y)
+        
+        # Compute weighted average of velocities
+        avg_velocity = jnp.sum(velocities * weights[:, None], axis=0)
+        
+        # Map back to manifold
+        new_point = exp_map_function(x, avg_velocity, 1.0)
+        
+        return new_point
+
+    assignments = jax.vmap(process_single_point)(pc_x, P_normalized)
+    
+    return assignments, 0
+
+
 
 def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
@@ -294,17 +441,27 @@ def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = Fals
     return(ot_matrix, ot_solve)
 
 
-def transport_plan_euclidean(pc_x, pc_y): 
-    matrix = jnp.eye(pc_x.shape[0])
-    return(matrix, 0)
+def transport_plan_random(pc_x, pc_y): 
+    # return a random transport plan, where each point in pc_x is assigned to a random point in pc_y (weighted by w_y)
+
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
+
+    # Create a random transport plan based on marginals
+    # P_ij = w_x[i] * w_y[j]
+    # This corresponds to the independent coupling (random assignment weighted by target mass)
+    ot_matrix = jnp.outer(w_x, w_y)
+    
+    
+    return(ot_matrix, 0)
 
 
-def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
+def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True, num_iteration = 200): 
     ot_solve = linear.solve(
         ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
         lse_mode = lse_mode,
-        min_iterations = 200,
-        max_iterations = 200)
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
     _, map_ind = get_assignments_rounding(ot_solve.matrix, pc_y=None)
     return(map_ind, ot_solve)
 
@@ -389,7 +546,7 @@ def matrix_sqrt(A):
     return eigenvectors @ jnp.diag(jnp.sqrt(eigenvalues)) @ eigenvectors.T
 
 
-def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False): 
+def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False, num_iteration = 200): 
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
 
@@ -398,17 +555,32 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False):
         a = w_x,
         b = w_y,
         lse_mode = lse_mode,
-        min_iterations = 200,
-        max_iterations = 200)
+        min_iterations = num_iteration,
+        max_iterations = num_iteration)
     return(ot_solve.reg_ot_cost)
 
 
 def euclidean_distance(pc_x, pc_y): 
-    pc_x, _ = pc_x[0], pc_x[1]
-    pc_y, _ = pc_y[0], pc_y[1]
+    pc_x, w_x = pc_x[0], pc_x[1]
+    pc_y, w_y = pc_y[0], pc_y[1]
 
-    dist = jnp.mean(jnp.sum((pc_x - pc_y)**2, axis = 1))
+    dist_max = jnp.mean(jnp.square(pc_x[:, None, :] - pc_y[None, :, :]), axis = -1)
+    weight_mat = jnp.outer(w_x, w_y)
+
+    dist = jnp.sum(dist_max * weight_mat)
     return(dist)
+
+def random_distance(pc_x, pc_y, distance_matrix_func):
+    
+    pc_x, w_x = pc_x
+    pc_y, w_y = pc_y
+
+    pairwise_dist = distance_matrix_func(pc_x, pc_y)
+
+    weight_mat = jnp.outer(w_x, w_y)
+    dist = jnp.sum(pairwise_dist * weight_mat)
+    return(dist)
+
 
 def chamfer_distance(pc_x, pc_y, distance_matrix_func):
     

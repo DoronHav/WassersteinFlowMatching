@@ -66,7 +66,11 @@ class RiemannianWassersteinFlowMatching:
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
-        self.point_clouds = [np.asarray(self.project_to_geometry(pc)) for pc in point_clouds]
+        print("Projecting point clouds to geometry (with cpu)...")
+        
+
+        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = True)) for pc in tqdm(point_clouds)]
+
 
         self.weights = [
             np.ones(pc.shape[0]) / pc.shape[0] for pc in self.point_clouds
@@ -81,9 +85,17 @@ class RiemannianWassersteinFlowMatching:
         self.noise_config = types.SimpleNamespace()
         self.noise_type = self.config.noise_type
         
+        self.noise_geom = self.config.noise_geom
+        if(self.noise_geom != self.geom):
+            print(f"Using {self.noise_geom} geometry for noise instead of {self.geom}")
+            self.noise_geom = self.config.noise_geom
+            self.noise_proj_to_geometry = getattr(utils_Geom, self.noise_geom)().project_to_geometry 
+        else:
+            print(f"Using {self.noise_geom} geometry for noise")
+            self.noise_proj_to_geometry = self.project_to_geometry  
         # Get noise functions from the factory
         self.noise_func, param_estimator = utils_Noise.get_noise_functions(
-            self.geom, self.noise_type, self.project_to_geometry
+            self.noise_geom, self.noise_type, self.noise_proj_to_geometry
         )
 
         self.matched_noise = False 
@@ -100,7 +112,7 @@ class RiemannianWassersteinFlowMatching:
             for key, value in self.noise_config.__dict__.items():
                 print(f"  {key}: {value}")
 
-        if self.num_sinkhorn_iters == -1:
+        if self.num_sinkhorn_iters == -1 and self.monge_map != 'random':
             print("Finding optimal number of Sinkhorn iterations...")
             key = random.key(0)
             noise_samples = self.noise_func(size=self.point_clouds.shape, 
@@ -131,24 +143,32 @@ class RiemannianWassersteinFlowMatching:
             print(f"Auto-selected {self.num_sinkhorn_iters} Sinkhorn iterations.")
 
         print(f"Using {self.monge_map} map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
-
-        self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan, 
-                                            distance_matrix_func =  self.geom_utils.distance_matrix,
-                                            eps = self.config.wasserstein_eps, 
-                                            lse_mode = self.config.wasserstein_lse, 
-                                            num_iteration = self.config.num_sinkhorn_iters),
-                                            (0, 0), 0)
         
+        if(self.monge_map == 'random'):
+            self.transport_plan_jit = jax.vmap(utils_OT.transport_plan_random,
+                                    (0, 0), 0)
+        else:
+            self.transport_plan_jit = jax.vmap(partial(utils_OT.transport_plan, 
+                                    distance_matrix_func = self.geom_utils.distance_matrix,
+                                    eps = self.config.wasserstein_eps, 
+                                    lse_mode = self.config.wasserstein_lse, 
+                                    num_iteration = self.config.num_sinkhorn_iters),
+                                    (0, 0), 0)
+
+  
+            
         if(self.monge_map == 'rounded_matching'):
             self.sample_map_jit = jax.vmap(lambda P, pc_y: utils_OT.get_assignments_rounding(P, pc_y)[0], (0, 0), 0)
-        elif(self.monge_map == 'sample'):
+        elif(self.monge_map == 'sample' or self.monge_map == 'random'):
             self.sample_map_jit = jax.vmap(lambda P, pc_y, key: utils_OT.get_assignments_sampling(P, key, pc_y)[0], (0, 0, 0), 0)
-        elif(self.monge_map == 'entropic'):
+        elif(self.monge_map == 'barycentric'):
             # Entropic assignment uses geometry-specific weighted mean
-            self.sample_map_jit = jax.vmap(lambda P, pc_y: partial(utils_OT.get_assignments_entropic, weighted_mean_func=self.geom_utils.weighted_mean)(P, pc_y)[0], (0, 0), 0)
+            self.sample_map_jit = jax.vmap(lambda P, pc_y: partial(utils_OT.get_assignments_barycentric, weighted_mean_func=self.geom_utils.weighted_mean)(P, pc_y)[0], (0, 0), 0)
+        elif(self.monge_map == 'entropic'):
+            self.sample_map_jit = jax.vmap(lambda P, pc_x, pc_y: utils_OT.get_assignments_entropic(P, pc_x, pc_y, self.geom_utils.velocity, self.geom_utils.exponential_map)[0], (0, 0, 0), 0)
         else:
-            # Default to rounded matching
-            self.sample_map_jit = jax.vmap(lambda P, pc_y: utils_OT.get_assignments_rounding(P, pc_y)[0], (0, 0), 0)
+            # raise error for unknown monge_map
+            raise ValueError(f"Unknown monge_map: {self.monge_map}")
         
 
         self.mini_batch_ot_mode = self.config.mini_batch_ot_mode
@@ -169,17 +189,26 @@ class RiemannianWassersteinFlowMatching:
                 print(f"Using CFG with null conditioning probability {self.p_cfg_null}, and weight {self.w_cfg}")
 
         else:
+            self.cfg = False
+            self.p_cfg_null = 0.0
+            self.w_cfg = 1.0
             self.conditioning = None
             self.conditioning_dim = -1
-
+ 
     
         if(self.mini_batch_ot_mode):
             self.mini_batch_ot_solver = self.config.mini_batch_ot_solver
+
             if(self.mini_batch_ot_solver == 'entropic'):
                 print("Entropic Mini-Batch")
                 self.ot_mat_jit = jax.vmap(partial(utils_OT.entropic_ot_distance, 
                                                    eps = self.config.minibatch_ot_eps,
-                                                   lse_mode = self.config.minibatch_ot_lse), (0, 0), 0)
+                                                   lse_mode = self.config.minibatch_ot_lse,
+                                                   num_iteration = self.num_sinkhorn_iters), (0, 0), 0)
+            elif(self.mini_batch_ot_solver == 'random'):
+                print("Random Mini-Batch")
+                self.ot_mat_jit = jax.vmap(partial(utils_OT.random_distance, 
+                            distance_matrix_func = self.geom_utils.distance_matrix), (0, 0), 0)
             elif(self.mini_batch_ot_solver == 'chamfer'):
                 print("Chamfer Mini-Batch")
                 self.ot_mat_jit = jax.vmap(partial(utils_OT.chamfer_distance, 
@@ -190,6 +219,33 @@ class RiemannianWassersteinFlowMatching:
             else:
                 print("Frechet Mini-Batch")
                 self.ot_mat_jit = jax.vmap(utils_OT.frechet_distance, (0, 0), 0)
+
+            self.mini_batch_ot_num_iter = self.config.mini_batch_ot_num_iter
+            if self.mini_batch_ot_num_iter == -1:
+                print("Finding optimal number of Sinkhorn iterations for Mini-Batch OT...")
+                
+                key = random.key(0)
+                noise_samples = self.noise_func(size=self.point_clouds.shape, 
+                                                noise_config=self.noise_config,
+                                                key=key)
+                if len(noise_samples) == 2:
+                    noise_samples, noise_weights = noise_samples
+                else:
+                    noise_weights = self.weights
+                
+                noise_samples = self.project_to_geometry(noise_samples)
+
+                self.mini_batch_ot_num_iter = utils_OT.auto_find_num_iter_minibatch(
+                    point_clouds=self.point_clouds,
+                    weights=self.weights,
+                    noise_point_clouds=noise_samples,
+                    noise_weights=noise_weights,
+                    ot_mat_jit=self.ot_mat_jit,
+                    eps = self.config.minibatch_ot_eps,
+                    lse_mode = self.config.minibatch_ot_lse,
+                    sample_size=2048
+                )
+                print(f"Auto-selected {self.mini_batch_ot_num_iter} Sinkhorn iterations for Mini-Batch OT.")
         
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
@@ -255,7 +311,7 @@ class RiemannianWassersteinFlowMatching:
             ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
                                         [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
 
-        noise_ind, ot_solve = utils_OT.ot_mat_from_distance(ot_matrix, 0.01, True)
+        noise_ind, ot_solve = utils_OT.ot_mat_from_distance(ot_matrix, 0.01, True, num_iteration=self.mini_batch_ot_num_iter)
         return(noise_ind, ot_solve)
 
     @partial(jit, static_argnums=(0,))
@@ -284,7 +340,7 @@ class RiemannianWassersteinFlowMatching:
             minibatch_key, key = random.split(key)
             noise_ind = self.minibatch_ot(point_clouds_batch, weights_batch, noise_samples, noise_weights, key=minibatch_key)[0]
             noise_samples = noise_samples[noise_ind]
-            if(self.monge_map == 'entropic'):
+            if(self.monge_map != 'rounded_matching'):
                 noise_weights = noise_weights[noise_ind]
 
         # Time random.uniform for interpolates_time
@@ -297,8 +353,12 @@ class RiemannianWassersteinFlowMatching:
         if self.monge_map == 'sample':
             # For sampling assignment, we need the random keys
             assigned_points = self.sample_map_jit(ot_matrix, point_clouds_batch, random.split(key, point_clouds_batch.shape[0]))
+        elif self.monge_map == 'random':
+            assigned_points = self.sample_map_jit(ot_matrix, point_clouds_batch, random.split(key, point_clouds_batch.shape[0]))
+        elif(self.monge_map == 'entropic'):
+            assigned_points = self.sample_map_jit(ot_matrix, noise_samples, point_clouds_batch)
         else:
-            # For other methods (rounded_matching and entropic), we don't need keys
+            # For other methods (rounded_matching and barycentric), we don't need keys
             assigned_points = self.sample_map_jit(ot_matrix, point_clouds_batch)
 
         point_cloud_interpolates = self.interpolant_vmap(noise_samples, assigned_points, 1-interpolates_time)
@@ -474,7 +534,7 @@ class RiemannianWassersteinFlowMatching:
             point_clouds = point_clouds[None, :, :]
             weights = weights[None, :]
 
-        if self.cfg is not None and conditioning is not None:
+        if conditioning is not None:
             cond_flow = jnp.squeeze(self.FlowMatchingModel.apply(
                 {"params": params},
                 point_cloud=point_clouds,
@@ -485,24 +545,28 @@ class RiemannianWassersteinFlowMatching:
                 deterministic=True
             ))
 
-            uncond_flow = jnp.squeeze(self.FlowMatchingModel.apply(
-                {"params": params},
-                point_cloud=point_clouds,
-                t=t * jnp.ones(point_clouds.shape[0]),
-                masks=weights > 0,
-                conditioning=conditioning,
-                is_null_conditioning=jnp.ones(point_clouds.shape[0], dtype=bool),
-                deterministic=True
-            ))
+            if(self.cfg):
+                uncond_flow = jnp.squeeze(self.FlowMatchingModel.apply(
+                    {"params": params},
+                    point_cloud=point_clouds,
+                    t=t * jnp.ones(point_clouds.shape[0]),
+                    masks=weights > 0,
+                    conditioning=conditioning,
+                    is_null_conditioning=jnp.ones(point_clouds.shape[0], dtype=bool),
+                    deterministic=True
+                ))
 
-            flow = uncond_flow + self.w_cfg * (cond_flow - uncond_flow)
+
+                flow = uncond_flow + self.w_cfg * (cond_flow - uncond_flow)
+            else:
+                flow = cond_flow
         else:
+
             flow = jnp.squeeze(self.FlowMatchingModel.apply(
                 {"params": params},
                 point_cloud=point_clouds,
                 t=t * jnp.ones(point_clouds.shape[0]),
                 masks=weights > 0,
-                conditioning=conditioning,
                 deterministic=True
             ))
 
@@ -562,6 +626,19 @@ class RiemannianWassersteinFlowMatching:
             if len(noise) == 2:
                 noise, noise_weights = noise
         
+        # fix size of noise and noise_weights to the max size of noise_weights.sum(axis=1)
+
+        max_size = int(jnp.max(jnp.sum(noise_weights > 0, axis=1)))
+        
+        # reorder noise and noise_weights to have the valid points first
+        def reorder_points(single_noise, single_weights):
+            sorted_indices = jnp.argsort(single_weights > 0)[::-1]
+            reordered_noise = jnp.take(single_noise, sorted_indices, axis=0)
+            reordered_weights = jnp.take(single_weights, sorted_indices, axis=0)
+            return reordered_noise[:max_size, :], reordered_weights[:max_size]
+        
+        noise, noise_weights = jax.vmap(reorder_points, in_axes=(0, 0))(noise, noise_weights)
+
         dt = 1 / timesteps
 
         def step_fn(carry, t):
