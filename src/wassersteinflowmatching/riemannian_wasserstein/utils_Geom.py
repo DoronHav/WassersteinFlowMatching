@@ -562,3 +562,89 @@ class hyperbolic:
         
         # Project back onto Poincaré ball (ensure norm < 1)
         return self.project_to_geometry(euclidean_mean)
+
+class so3:
+    # We use quaternions representation of SO(3) for simplicity
+    # A point cloud has a shape (p,n,4) where each point is a unit quaternion
+    def project_to_geometry(self, P):
+        # Project points to ensure they are normalized
+        return P /  jnp.linalg.norm(P, axis=-1, keepdims=True) 
+
+    def quaternion_conjugate(self, q):
+        # q = [w, x, y, z]
+        return jnp.stack([q[..., 0], -q[..., 1], -q[..., 2], -q[..., 3]],axis=-1)
+
+    def quaternion_multiply(self, q1, q2):
+        w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+        w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+        return jnp.stack([w, x, y, z], axis=-1)
+
+    def velocity(self, P0, P1, t):
+        """
+        velocity is the rotation vector (in R3)
+        """
+        # Normalize P0 and P1 to ensure they are on SO(3)
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+
+        # Ensure shortest path (handle double cover)
+        P1 = jnp.where(jnp.sum(P0 * P1, axis=-1, keepdims=True) < 0, P1 * -1, P1)
+        
+        # Compute the relative rotation quaternion
+        q_rel = self.quaternion_multiply(self.quaternion_conjugate(P0), P1)
+        
+        # Convert to axis-angle representation
+        angle = jnp.arccos(jnp.clip(q_rel[..., 0], -1.0, 1.0))
+        axis = q_rel[..., 1:] / jnp.linalg.norm(q_rel[..., 1:], axis=-1, keepdims=True)
+
+        epsilon_vec = angle[...,None] * axis
+        
+        return epsilon_vec
+    
+    def exponential_map(self, p, v, delta_t):
+        # p: quaternion [w, x, y, z]
+        # v: angular velocity vector [omega, vx, vy, vz]
+        # delta_t: time step
+        theta = jnp.linalg.norm(v, axis=-1)[...,None]
+        theta = jnp.where(theta < 1e-8, 0, theta)  # avoid division by zero
+
+        u = v / theta
+        alpha = delta_t * theta
+
+        step = jnp.concatenate([jnp.cos(alpha), jnp.sin(alpha) * u],axis=-1)
+
+        q_rot = self.quaternion_multiply(p, step)
+        return self.project_to_geometry(q_rot)
+
+    def interpolant(self, P0, P1, t):
+        # Normalize P0 and P1 to ensure they are on SO(3)
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+        velocity = self.velocity(P0, P1, t=0)
+        q_interp = self.exponential_map(P0, velocity, t)
+        return q_interp
+    
+    def tangent_norm(self, v, w):
+        # Simply use Euclidean norm in axis-angle representation
+        return jnp.mean(jnp.square(v - w))
+
+if __name__ == "__main__":
+    ### SO3 test
+    
+    import jax
+    key = jax.random.key(42)
+    key, subkey = jax.random.split(key)
+    # Create random arrays of sie 10x5x4
+    P0 = jax.random.uniform(subkey, (10,5,4))
+    key, subkey = jax.random.split(key)
+    P1 = jax.random.uniform(subkey, (10,5,4))
+    geo_cls = so3()
+    P0 = geo_cls.project_to_geometry(P0)
+    P1 = geo_cls.project_to_geometry(P1)
+    # Check if 0 and 1 are close to endpoints
+    assert jnp.allclose(geo_cls.interpolant(P0,P1,0),P0)
+    assert jnp.allclose(geo_cls.interpolant(P0,P1,1),P1)
