@@ -53,6 +53,7 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
 
         # -- Downsampling / Upsampling Logic --
         # Ensure fixed size for vmap
+        
         if len(x) != sample_size:
             replace = len(x) < sample_size
             ix = np.random.choice(len(x), sample_size, replace=replace)

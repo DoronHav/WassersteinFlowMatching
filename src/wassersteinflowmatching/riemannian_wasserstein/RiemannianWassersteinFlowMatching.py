@@ -94,8 +94,7 @@ class RiemannianWassersteinFlowMatching:
             print(f"Using {self.noise_geom} geometry for noise")
             self.noise_proj_to_geometry = self.project_to_geometry  
         # Get noise functions from the factory
-        self.noise_func, param_estimator = utils_Noise.get_noise_functions(
-            self.noise_geom, self.noise_type, self.noise_proj_to_geometry
+        self.noise_func, param_estimator = utils_Noise.get_noise_functions(self.noise_type, self.noise_proj_to_geometry
         )
 
         self.matched_noise = False 
