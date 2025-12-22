@@ -173,6 +173,9 @@ class AttentionNN(nn.Module):
             if is_null_conditioning is None:
                 is_null_conditioning = jnp.zeros(conditioning.shape[0], dtype=bool)
 
+            # setting as null conditioning if any condition is nan.
+            is_null_conditioning = jnp.isnan(conditioning).any(axis=-1) + is_null_conditioning
+            
             if config.normalized_condition:
                 # First, pass all conditioning vectors through the dense layer
                 c_emb = nn.Dense(features=embedding_dim)(conditioning)

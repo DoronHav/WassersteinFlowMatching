@@ -77,6 +77,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         pc_start_dict = metadata.reset_index().groupby("pc_index")["index"].min().to_dict()
         
         self.pcid_dict = {k:i for i,k in enumerate(pc_length_dict.keys())}
+        self.pcid_dict_reverse = {v:k for k,v in self.pcid_dict.items()}
         #start and end index of each point cloud.
         self.pc_idx_dict_ = {k:(pc_start_dict[k], pc_start_dict[k]+pc_length_dict[k]) for k in pc_length_dict.keys()}
         self.pc_idx_dict = {self.pcid_dict[k]:v for k,v in self.pc_idx_dict_.items()}
@@ -176,10 +177,14 @@ class PascientFM(RiemannianWassersteinFlowMatching):
 
 
         if(conditioning is not None):
-            self.conditioning = jnp.array(conditioning)
-            if self.conditioning.ndim == 1:
-                self.conditioning = self.conditioning[:, None]
-            self.conditioning_dim = self.conditioning.shape[-1]
+            
+            pcidx_ordered = [self.pcid_dict_reverse[i_] for i_ in range(len(self.pcid_dict_reverse))]
+            conditioning.set_index("pc_index", inplace=True)
+            conditioning = conditioning.loc[pcidx_ordered]
+            
+            self.conditioning = conditioning.values
+            self.conditioning = jnp.where(self.conditioning == -1, jnp.nan, self.conditioning)
+            self.conditioning_dim = self.conditioning.shape[1]
             self.config.conditioning_dim = self.conditioning_dim
             self.mini_batch_ot_mode = False
 
@@ -337,5 +342,20 @@ class PascientFM(RiemannianWassersteinFlowMatching):
             print("\nTraining interrupted by user. The model state has been saved.")
 
         # Ensure state is unreplicated when returning, for compatibility with other methods
-        self.state = jax_utils.unreplicate(self.state)
+        #self.state = jax_utils.unreplicate(self.state)
         self.params = self.state.params
+        
+    def save(self, path):
+        """
+        Save the model state to the specified path using pickle.
+
+        :param path: (str) Path where the model state will be saved.
+        """
+        if hasattr(self, 'state'):
+            # Ensure we are saving the unreplicated state
+            state_to_save = self.state
+            with open(path, 'wb') as f:
+                pickle.dump(state_to_save, f)
+            print(f"Model saved to {path}")
+        else:
+            print("Model state not found. Please train the model before saving.")

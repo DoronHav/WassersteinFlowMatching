@@ -92,7 +92,7 @@ def main():
     """Main execution function."""
 
     # Load and preprocess data
-    max_files = 10000  # For testing, limit number of files to load
+    max_files = 5  # For testing, limit number of files to load
     data_dir = "/braid/cellm/2025Q1_scimilarity_embeddings/"
     split_path = "/braid/cellm/zarrs/2025Q1_sample/splits/split_v1.json"
     embedding_prefix = "emb"
@@ -116,17 +116,34 @@ def main():
     df_test = full_df[full_df['dsid'].isin(splits['test'])]
 
     df_train["pc_index"] = df_train["dsid"].astype(str) + ":::" + df_train["sample"].astype(str)
+
     df_train.drop(columns=["dsid","sample"], inplace=True)
+    
+    # Map Tissue and Disease to numerical values
+    # We set -1 for unknown/nans
+    
+    df_train[["tissue", "disease"]] = df_train[["tissue", "disease"]].fillna("nan")
+    tissue_dict = dict(zip(df_train["tissue"].unique(), range(df_train["tissue"].nunique())))
+    tissue_dict["nan"] = -1
+    disease_dict = dict(zip(df_train["disease"].unique(), range(df_train["disease"].nunique())))
+    disease_dict["nan"] = -1
+
+    df_train["tissue"] = df_train["tissue"].map(tissue_dict)
+    df_train["disease"] = df_train["disease"].map(disease_dict)
+
+    conditioning = df_train[["pc_index","tissue","disease"]].drop_duplicates()
+    
     # Initialize model
     print("\nInitializing Flow Matching Model...")
     flow_model = PascientFM(
         point_clouds=df_train,
-        config=rwfm_config
+        config=rwfm_config,
+        conditioning = conditioning
     )
 
     batch_size = 32
     training_steps = 200000
-    decay_steps = 2000 
+    decay_steps = 50000 
     flow_model.train(
         batch_size=batch_size,
         training_steps=training_steps,
@@ -136,9 +153,8 @@ def main():
         wandb_config = {"project": "WFM"}
     )
     
-
-
-
+    #save model
+    flow_model.save("./scimilarity_flow_model.pkl")
 
 
 if __name__ == "__main__":
