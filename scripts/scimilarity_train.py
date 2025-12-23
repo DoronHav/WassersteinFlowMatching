@@ -24,6 +24,7 @@ from scipy.spatial.distance import cdist
 import multiprocessing
 from itertools import product
 import torch
+import pickle
 
 import ott
 from ott.solvers import linear
@@ -92,7 +93,7 @@ def main():
     """Main execution function."""
 
     # Load and preprocess data
-    max_files = 5  # For testing, limit number of files to load
+    max_files = 50000  # For testing, limit number of files to load
     data_dir = "/braid/cellm/2025Q1_scimilarity_embeddings/"
     split_path = "/braid/cellm/zarrs/2025Q1_sample/splits/split_v1.json"
     embedding_prefix = "emb"
@@ -108,37 +109,57 @@ def main():
             break
     full_df = pd.concat(df_list, ignore_index=True)
     del df_list
+    print(f"Loaded parquet files.")
 
-    with open(split_path, 'r') as f:
-        splits = json.load(f)
-    df_train = full_df[full_df['dsid'].isin(splits['train'])]
-    df_val = full_df[full_df['dsid'].isin(splits['val'])]
-    df_test = full_df[full_df['dsid'].isin(splits['test'])]
+    #with open(split_path, 'r') as f:
+    #    splits = json.load(f)
+    #df_train = full_df[full_df['dsid'].isin(splits['train'])]
+    #df_val = full_df[full_df['dsid'].isin(splits['val'])]
+    #df_test = full_df[full_df['dsid'].isin(splits['test'])]
 
-    df_train["pc_index"] = df_train["dsid"].astype(str) + ":::" + df_train["sample"].astype(str)
+    full_df["pc_index"] = full_df["dsid"].astype(str) + ":::" + full_df["sample"].astype(str)
 
-    df_train.drop(columns=["dsid","sample"], inplace=True)
+    full_df.drop(columns=["dsid","sample"], inplace=True)
     
-    # Map Tissue and Disease to numerical values
-    # We set -1 for unknown/nans
-    
-    df_train[["tissue", "disease"]] = df_train[["tissue", "disease"]].fillna("nan")
-    tissue_dict = dict(zip(df_train["tissue"].unique(), range(df_train["tissue"].nunique())))
-    tissue_dict["nan"] = -1
-    disease_dict = dict(zip(df_train["disease"].unique(), range(df_train["disease"].nunique())))
-    disease_dict["nan"] = -1
+    # Map Tissue and Disease to embeddings
+    print("Mapping tissue and disease to embeddings...")
 
-    df_train["tissue"] = df_train["tissue"].map(tissue_dict)
-    df_train["disease"] = df_train["disease"].map(disease_dict)
+    cond_df = full_df[["pc_index","tissue","disease"]].drop_duplicates()
 
-    conditioning = df_train[["pc_index","tissue","disease"]].drop_duplicates()
+    # cleaned disease map
+    clean_disease_map = pd.read_csv('/data/debroue1/cellm/2025Q1/clean_disease_map.csv')
+    clean_disease_map = dict(zip(clean_disease_map['disease'], clean_disease_map['HarmonizedLabel']))
+
+    cond_df["disease"] = cond_df["disease"].map(clean_disease_map)
+    cond_df.loc[cond_df["disease"]=="Other", "disease"] = np.nan
+
+    # cleaned tissue map
+    clean_tissue_map = pd.read_csv('/data/debroue1/cellm/2025Q1/clean_tissue_map.csv')
+    clean_tissue_map = dict(zip(clean_tissue_map['tissue'], clean_tissue_map['tissue_clean']))
+
+    cond_df["tissue"] = cond_df["tissue"].map(clean_tissue_map)
     
+    #load embedding dicts
+    with open('/data/debroue1/cellm/2025Q1/disease_embedding_dict.pkl', 'rb') as f:
+        disease_dict = pickle.load(f)
+    with open('/data/debroue1/cellm/2025Q1/tissue_embedding_dict.pkl', 'rb') as f:
+        tissue_dict = pickle.load(f)
+
+    tissue_embds = cond_df["tissue"].map(tissue_dict)
+    disease_embds = cond_df["disease"].map(disease_dict)
+    
+    tissue_list = [x if isinstance(x, (np.ndarray, list)) else np.zeros(16) for x in tissue_embds]
+    disease_list = [x if isinstance(x, (np.ndarray, list)) else np.zeros(11) for x in disease_embds]
+ 
+    tissue_df = pd.DataFrame(tissue_list, columns = [f"tissue_embd_{i}" for i in range(16)], index = cond_df.index)
+    disease_df = pd.DataFrame(disease_list, columns=[f"disease_embd_{i}" for i in range(11)], index = cond_df.index)
+    cond_df = pd.concat([cond_df[["pc_index"]], tissue_df, disease_df], axis=1)
     # Initialize model
     print("\nInitializing Flow Matching Model...")
     flow_model = PascientFM(
-        point_clouds=df_train,
+        point_clouds=full_df,
         config=rwfm_config,
-        conditioning = conditioning
+        conditioning = cond_df
     )
 
     batch_size = 32

@@ -3,6 +3,7 @@ import types # type: ignore
  
 import jax # type: ignore
 import jax.numpy as jnp # type: ignore
+from flax import serialization
 import numpy as np  # type: ignore
 import optax # type: ignore
 from jax import jit, random# type: ignore
@@ -67,6 +68,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
+        print("Processing point clouds...")
         embedding_prefix = "emb"
         emb_cols = [c for c in point_clouds.columns if c.startswith(embedding_prefix)]
         meta_cols = [c for c in point_clouds.columns if c not in emb_cols]
@@ -87,6 +89,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         for k,v in self.pc_idx_dict.items():
             self.weights[v[0]:v[1]] /= (v[1]-v[0])
 
+        print("Sampling point clouds for initialization...")
         sampled_idx = np.random.choice(list(self.pc_idx_dict.keys()), size=min(100, len(self.pc_idx_dict)), replace=False)
         sampled_pcs = [self.point_clouds[self.pc_idx_dict[s][0]:self.pc_idx_dict[s][1]] for s in sampled_idx]
         sampled_weights = [self.weights[self.pc_idx_dict[s][0]:self.pc_idx_dict[s][1]] for s in sampled_idx]
@@ -177,13 +180,12 @@ class PascientFM(RiemannianWassersteinFlowMatching):
 
 
         if(conditioning is not None):
-            
             pcidx_ordered = [self.pcid_dict_reverse[i_] for i_ in range(len(self.pcid_dict_reverse))]
             conditioning.set_index("pc_index", inplace=True)
             conditioning = conditioning.loc[pcidx_ordered]
             
             self.conditioning = conditioning.values
-            self.conditioning = jnp.where(self.conditioning == -1, jnp.nan, self.conditioning)
+            #self.conditioning = jnp.where(self.conditioning == -1, jnp.nan, self.conditioning)
             self.conditioning_dim = self.conditioning.shape[1]
             self.config.conditioning_dim = self.conditioning_dim
             self.mini_batch_ot_mode = False
@@ -355,7 +357,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
             # Ensure we are saving the unreplicated state
             state_to_save = self.state
             with open(path, 'wb') as f:
-                pickle.dump(state_to_save, f)
+                f.write(serialization.to_bytes(state_to_save))
             print(f"Model saved to {path}")
         else:
             print("Model state not found. Please train the model before saving.")
