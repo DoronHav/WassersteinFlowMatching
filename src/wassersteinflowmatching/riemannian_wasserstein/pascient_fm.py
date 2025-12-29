@@ -18,12 +18,12 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
-import wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
-import wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
 from flax import jax_utils
 from torch.utils.data import DataLoader
@@ -31,7 +31,7 @@ from typing import Union
 
 from jax import lax
 
-from wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
+from src.wassersteinflowmatching.riemannian_wasserstein import RiemannianWassersteinFlowMatching
 
 
 class PascientFM(RiemannianWassersteinFlowMatching):

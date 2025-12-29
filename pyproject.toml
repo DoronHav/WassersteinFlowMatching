@@ -26,10 +26,3 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.uv.sources]
-pascientloaders = { index = "roche-pypi" }
-
-[[tool.uv.index]]
-name = "roche-pypi"
-url = "https://pypi.cedar.roche.com/simple/"

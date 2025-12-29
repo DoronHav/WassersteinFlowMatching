@@ -10,12 +10,12 @@ from tqdm import trange, tqdm # type: ignore
 from flax.training import train_state # type: ignore
 import pickle # type: ignore
 
-import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
-import wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
-import wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
-from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
+import src.wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
 
 class RiemannianWassersteinFlowMatching:
