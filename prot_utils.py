@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from typing import NamedTuple, Optional
 from pathlib import Path
-
+import mdtraj as md
 
 class BackboneFrames(NamedTuple):
     """SE(3) frames for protein backbone residues."""
@@ -501,7 +501,121 @@ def plot_backbone_frames(
         # print(f"Saved figure to {save_path}")
     
     plt.show()
-    # return fig
+
+def trajectory_to_se3_frames(
+    topology_path: str,
+    trajectory_path: str,
+    stride: int = 1,
+) -> list[jnp.ndarray]:
+    """
+    Convert an MD trajectory to a list of SE(3) frames.
+    
+    Uses MDTraj to load the trajectory. Supports common formats:
+    - Topology: PDB, GRO, PSF, PRMTOP, etc.
+    - Trajectory: XTC, TRR, DCD, NC, HDF5, etc.
+    
+    Args:
+        topology_path: Path to topology file (e.g., PDB, GRO)
+        trajectory_path: Path to trajectory file (e.g., XTC, DCD)
+                        Can be same as topology_path for multi-model PDB
+        stride: Load every nth frame (default: 1 = all frames)
+    
+    Returns:
+        List of K arrays, each of shape (N_res, 7) with [w, x, y, z, tx, ty, tz]
+    """
+    
+    # Load trajectory
+    if topology_path == trajectory_path:
+        # Single file (e.g., multi-model PDB)
+        traj = md.load(trajectory_path, stride=stride)
+    else:
+        traj = md.load(trajectory_path, top=topology_path, stride=stride)
+    
+    # Get atom indices for backbone atoms
+    # MDTraj uses nanometers, we'll convert to Angstroms
+    topology = traj.topology
+    
+    # Build residue -> backbone atom index mapping
+    n_residues = topology.n_residues
+    n_indices = np.full(n_residues, -1, dtype=int)
+    ca_indices = np.full(n_residues, -1, dtype=int)
+    c_indices = np.full(n_residues, -1, dtype=int)
+    
+    for residue in topology.residues:
+        res_idx = residue.index
+        for atom in residue.atoms:
+            if atom.name == 'N':
+                n_indices[res_idx] = atom.index
+            elif atom.name == 'CA':
+                ca_indices[res_idx] = atom.index
+            elif atom.name == 'C':
+                c_indices[res_idx] = atom.index
+    
+    # Process each frame
+    frames_list = []
+    
+    for frame_idx in range(traj.n_frames):
+        # Get coordinates for this frame (convert nm -> Å)
+        coords = traj.xyz[frame_idx] * 10.0  # nm to Angstroms
+        
+        # Extract backbone coordinates
+        n_coords = np.full((n_residues, 3), np.nan)
+        ca_coords = np.full((n_residues, 3), np.nan)
+        c_coords = np.full((n_residues, 3), np.nan)
+        
+        for i in range(n_residues):
+            if n_indices[i] >= 0:
+                n_coords[i] = coords[n_indices[i]]
+            if ca_indices[i] >= 0:
+                ca_coords[i] = coords[ca_indices[i]]
+            if c_indices[i] >= 0:
+                c_coords[i] = coords[c_indices[i]]
+        
+        # Convert to JAX arrays
+        n_coords_jax = jnp.array(n_coords)
+        ca_coords_jax = jnp.array(ca_coords)
+        c_coords_jax = jnp.array(c_coords)
+        
+        # Construct frames
+        rotation_matrices, translations, mask = construct_backbone_frames(
+            n_coords_jax, ca_coords_jax, c_coords_jax
+        )
+        
+        # Convert to quaternions
+        quaternions = rotation_matrix_to_quaternion(rotation_matrices)
+        
+        # Handle invalid residues
+        identity_quat = jnp.array([1.0, 0.0, 0.0, 0.0])
+        quaternions = jnp.where(mask[:, None], quaternions, identity_quat)
+        
+        # Concatenate to (N_res, 7)
+        frames = jnp.concatenate([quaternions, translations], axis=-1)
+        frames_list.append(frames)
+    
+    return frames_list
+
+
+def trajectory_to_se3_frames_stacked(
+    topology_path: str,
+    trajectory_path: str,
+    stride: int = 1,
+) -> jnp.ndarray:
+    """
+    Convert an MD trajectory to a stacked array of SE(3) frames.
+    
+    Same as trajectory_to_se3_frames but returns a single (K, N_res, 7) array
+    instead of a list, which is more convenient for batch operations.
+    
+    Args:
+        topology_path: Path to topology file
+        trajectory_path: Path to trajectory file
+        stride: Load every nth frame
+    
+    Returns:
+        Array of shape (K, N_res, 7) with [w, x, y, z, tx, ty, tz] per residue
+    """
+    frames_list = trajectory_to_se3_frames(topology_path, trajectory_path, stride)
+    return jnp.stack(frames_list, axis=0)    
 
 # ============================================================================
 # Example usage and verification
