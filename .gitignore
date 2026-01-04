@@ -162,3 +162,5 @@ cython_debug/
 #.idea/
 aws_credentials.json
 data/*
+
+*.gif
