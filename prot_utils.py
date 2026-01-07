@@ -160,3 +160,73 @@ def get_ca_trajectory(h5_path, temperature='320', replica='0'):
         c_coords = coords[:, c_indices, :]
         
     return ca_coords, n_coords, c_coords, domain_id
+
+import jax.numpy as jnp
+import numpy as np
+
+def quat_to_rotmat(q):
+    """Convert quaternion (w, x, y, z) to rotation matrix."""
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    
+    return jnp.stack([
+        jnp.stack([1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)], axis=-1),
+        jnp.stack([2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)], axis=-1),
+        jnp.stack([2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)], axis=-1),
+    ], axis=-2)
+
+def local_backbone():
+    """Idealized N, CA, C in local frame (CA at origin)."""
+    return jnp.array([
+        [-1.46, 0.0, 0.0],
+        [0.0,   0.0, 0.0],
+        [1.52,  0.0, 0.0],
+    ])
+
+def trajectory_to_coords(trajectory):
+    """
+    Convert SE(3) trajectory to backbone coordinates.
+    
+    Args:
+        trajectory: (T, N, 7) - [quat_w, quat_x, quat_y, quat_z, tx, ty, tz]
+    
+    Returns:
+        coords: (T, N, 3, 3) - N, CA, C for each residue at each timestep
+    """
+    quats = trajectory[..., :4]        # (T, N, 4)
+    trans = trajectory[..., 4:]        # (T, N, 3)
+    
+    rotmats = quat_to_rotmat(quats)    # (T, N, 3, 3)
+    local_atoms = local_backbone()     # (3, 3)
+    
+    # Apply frames: (T, N, 3, 3) @ (3, 3).T + (T, N, 1, 3)
+    coords = jnp.einsum('tnij,kj->tnki', rotmats, local_atoms) + trans[:, :, None, :]
+    return coords
+
+def save_trajectory_pdb(coords, filename):
+    """
+    Save trajectory to multi-model PDB.
+    
+    Args:
+        coords: (T, N, 3, 3) - trajectory of backbone coordinates
+        filename: output path
+    """
+    coords = np.array(coords)
+    T, N, _, _ = coords.shape
+    atom_names = ['N', 'CA', 'C']
+    
+    with open(filename, 'w') as f:
+        for t in range(T):
+            f.write(f"MODEL     {t+1:4d}\n")
+            atom_idx = 1
+            
+            for res_idx in range(N):
+                for atom_name, xyz in zip(atom_names, coords[t, res_idx]):
+                    f.write(
+                        f"ATOM  {atom_idx:5d}  {atom_name:<3s} ALA A{res_idx+1:4d}    "
+                        f"{xyz[0]:8.3f}{xyz[1]:8.3f}{xyz[2]:8.3f}"
+                        f"  1.00  0.00           {atom_name[0]:>2s}\n"
+                    )
+                    atom_idx += 1
+            
+            f.write("ENDMDL\n")
+        f.write("END\n")
