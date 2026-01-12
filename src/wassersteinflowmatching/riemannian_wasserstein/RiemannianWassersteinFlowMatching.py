@@ -14,6 +14,7 @@ import src.wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT #
 import src.wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
 import src.wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
 from src.wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
+from src.wassersteinflowmatching.riemannian_wasserstein._utils_GeomTransformer import SE3AttentionNN # type: ignore
 from src.wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
 from src.wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
@@ -246,8 +247,10 @@ class RiemannianWassersteinFlowMatching:
                 )
                 print(f"Auto-selected {self.mini_batch_ot_num_iter} Sinkhorn iterations for Mini-Batch OT.")
         
-        self.FlowMatchingModel = AttentionNN(config = self.config)
-
+        if self.config.geom == "se3":
+            self.FlowMatchingModel = SE3AttentionNN(config = self.config)
+        else:
+            self.FlowMatchingModel = AttentionNN(config = self.config)
     
 
     def create_train_state(self, model, learning_rate, decay_steps, key = random.key(0)):
