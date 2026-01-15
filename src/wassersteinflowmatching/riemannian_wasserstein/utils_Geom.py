@@ -694,9 +694,11 @@ class se3:
         pose_interp = self.exponential_map(P0, velocity, t)
         return pose_interp
 
-    def tangent_norm(self, v, w):
-        # Euclidean norm in twist space
-        return jnp.mean(jnp.square(v - w))
+    def tangent_norm(self, v, w, p):
+        # Euclidean norm in twist space –> return per-residue norm
+        v = v.reshape(-1, 7)  # (N_res, 7)
+        w = w.reshape(-1, 7)  # (N_res, 7)
+        return jnp.sqrt(jnp.sum(jnp.square(v - w), axis=-1))  # (N_res,)
 
     def distance(self, P0, P1):
         # Normalize P0 and P1
@@ -787,3 +789,10 @@ if __name__ == "__main__":
     print('SE3 distance shape:', dist_se3.shape)
     print('SE3 distance matrix shape:', dist_mat_se3.shape)
     print('Test passed')
+
+    # test tangent norm of se3
+    v_se3 = jax.random.uniform(subkey, (6,))
+    key, subkey = jax.random.split(key)
+    w_se3 = jax.random.uniform(subkey, (6,))
+    tn_se3 = geo_se3.tangent_norm(v_se3, w_se3)
+    print('SE3 tangent norm:', tn_se3)      
