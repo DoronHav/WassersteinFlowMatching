@@ -173,13 +173,18 @@ class AttentionNN(nn.Module):
             if is_null_conditioning is None:
                 is_null_conditioning = jnp.zeros(conditioning.shape[0], dtype=bool)
 
+            # setting as null conditioning if any condition is nan.
+            #is_null_conditioning = jnp.isnan(conditioning).any(axis=-1) + is_null_conditioning
+            
             if config.normalized_condition:
                 # First, pass all conditioning vectors through the dense layer
                 c_emb = nn.Dense(features=embedding_dim)(conditioning)
 
                 # Project the embeddings onto the unit hypersphere
-                norm = jnp.linalg.norm(c_emb, axis=-1, keepdims=True)
-                c_emb = c_emb / (norm + 1e-8)
+                # Use safe norm (eps inside sqrt) to avoid NaN gradients for zero vectors
+                sq_norm = jnp.sum(jnp.square(c_emb), axis=-1, keepdims=True)
+                norm = jnp.sqrt(sq_norm + 1e-8)
+                c_emb = c_emb / norm
 
                 # Selectively set the embedding to zero for samples marked as null
                 c_emb = jnp.where(

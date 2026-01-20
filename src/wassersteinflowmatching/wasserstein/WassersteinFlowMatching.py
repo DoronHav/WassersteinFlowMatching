@@ -17,7 +17,7 @@ from wassersteinflowmatching.wasserstein._utils_Transformer import AttentionNN #
 from wassersteinflowmatching.wasserstein.DefaultConfig import WassersteinFlowMatchingConfig # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
-import wandb
+# import wandb
 
 
 class WassersteinFlowMatching:

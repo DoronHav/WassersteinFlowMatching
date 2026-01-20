@@ -3,6 +3,7 @@ import types # type: ignore
  
 import jax # type: ignore
 import jax.numpy as jnp # type: ignore
+from flax import serialization
 import numpy as np  # type: ignore
 import optax # type: ignore
 from jax import jit, random# type: ignore
@@ -10,13 +11,12 @@ from tqdm import trange, tqdm # type: ignore
 from flax.training import train_state # type: ignore
 import pickle # type: ignore
 import pandas as pd
-import time
 
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
+# try:
+#     import wandb
+#     WANDB_AVAILABLE = True
+# except ImportError:
+#     WANDB_AVAILABLE = False
 
 import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
@@ -26,7 +26,7 @@ from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import Default
 from wassersteinflowmatching.riemannian_wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
 from flax import jax_utils
-from torch.utils.data import DataLoader
+# from torch.utils.data import DataLoader
 from typing import Union
 
 from jax import lax
@@ -68,6 +68,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
+        print("Processing point clouds...")
         embedding_prefix = "emb"
         emb_cols = [c for c in point_clouds.columns if c.startswith(embedding_prefix)]
         meta_cols = [c for c in point_clouds.columns if c not in emb_cols]
@@ -78,6 +79,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         pc_start_dict = metadata.reset_index().groupby("pc_index")["index"].min().to_dict()
         
         self.pcid_dict = {k:i for i,k in enumerate(pc_length_dict.keys())}
+        self.pcid_dict_reverse = {v:k for k,v in self.pcid_dict.items()}
         #start and end index of each point cloud.
         self.pc_idx_dict_ = {k:(pc_start_dict[k], pc_start_dict[k]+pc_length_dict[k]) for k in pc_length_dict.keys()}
         self.pc_idx_dict = {self.pcid_dict[k]:v for k,v in self.pc_idx_dict_.items()}
@@ -87,6 +89,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         for k,v in self.pc_idx_dict.items():
             self.weights[v[0]:v[1]] /= (v[1]-v[0])
 
+        print("Sampling point clouds for initialization...")
         sampled_idx = np.random.choice(list(self.pc_idx_dict.keys()), size=min(100, len(self.pc_idx_dict)), replace=False)
         sampled_pcs = [self.point_clouds[self.pc_idx_dict[s][0]:self.pc_idx_dict[s][1]] for s in sampled_idx]
         sampled_weights = [self.weights[self.pc_idx_dict[s][0]:self.pc_idx_dict[s][1]] for s in sampled_idx]
@@ -101,17 +104,9 @@ class PascientFM(RiemannianWassersteinFlowMatching):
         self.noise_config = types.SimpleNamespace()
         self.noise_type = self.config.noise_type
         
-        
-        self.noise_geom = self.config.noise_geom
-        if(self.noise_geom != self.geom):
-            print(f"Using {self.noise_geom} geometry for noise instead of {self.geom}")
-            self.noise_geom = self.config.noise_geom
-            self.noise_proj_to_geometry = getattr(utils_Geom, self.noise_geom)().project_to_geometry 
-        else:
-            print(f"Using {self.noise_geom} geometry for noise")
-            self.noise_proj_to_geometry = self.project_to_geometry  
         # Get noise functions from the factory
-        self.noise_func, param_estimator = utils_Noise.get_noise_functions(self.noise_type, self.noise_proj_to_geometry
+        self.noise_func, param_estimator = utils_Noise.get_noise_functions(
+            self.geom, self.noise_type, self.project_to_geometry
         )
 
         self.matched_noise = False 
@@ -185,10 +180,13 @@ class PascientFM(RiemannianWassersteinFlowMatching):
 
 
         if(conditioning is not None):
-            self.conditioning = jnp.array(conditioning)
-            if self.conditioning.ndim == 1:
-                self.conditioning = self.conditioning[:, None]
-            self.conditioning_dim = self.conditioning.shape[-1]
+            pcidx_ordered = [self.pcid_dict_reverse[i_] for i_ in range(len(self.pcid_dict_reverse))]
+            conditioning.set_index("pc_index", inplace=True)
+            conditioning = conditioning.loc[pcidx_ordered]
+            
+            self.conditioning = conditioning.values
+            #self.conditioning = jnp.where(self.conditioning == -1, jnp.nan, self.conditioning)
+            self.conditioning_dim = self.conditioning.shape[1]
             self.config.conditioning_dim = self.conditioning_dim
             self.mini_batch_ot_mode = False
 
@@ -220,33 +218,6 @@ class PascientFM(RiemannianWassersteinFlowMatching):
             else:
                 print("Frechet Mini-Batch")
                 self.ot_mat_jit = jax.vmap(utils_OT.frechet_distance, (0, 0), 0)
-
-            self.mini_batch_ot_num_iter = self.config.mini_batch_ot_num_iter
-            if self.mini_batch_ot_num_iter == -1:
-                print("Finding optimal number of Sinkhorn iterations for Mini-Batch OT...")
-                
-                key = random.key(0)
-                noise_samples = self.noise_func(size=self.sampled_point_clouds.shape, 
-                                                noise_config=self.noise_config,
-                                                key=key)
-                if len(noise_samples) == 2:
-                    noise_samples, noise_weights = noise_samples
-                else:
-                    noise_weights = self.sampled_weights
-                
-                noise_samples = self.project_to_geometry(noise_samples)
-
-                self.mini_batch_ot_num_iter = utils_OT.auto_find_num_iter_minibatch(
-                    point_clouds=self.sampled_point_clouds,
-                    weights=self.sampled_weights,
-                    noise_point_clouds=noise_samples,
-                    noise_weights=noise_weights,
-                    ot_mat_jit=self.ot_mat_jit,
-                    eps = self.config.minibatch_ot_eps,
-                    lse_mode = self.config.minibatch_ot_lse,
-                    sample_size=2048
-                )
-                print(f"Auto-selected {self.mini_batch_ot_num_iter} Sinkhorn iterations for Mini-Batch OT.")
         
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
@@ -321,17 +292,11 @@ class PascientFM(RiemannianWassersteinFlowMatching):
                     a = len(self.pc_idx_dict),
                     shape=[batch_size])
 
-                t = time.time()
-
                 pcs = [self.point_clouds[self.pc_idx_dict[int(bx)][0]:self.pc_idx_dict[int(bx)][1]] for bx in batch_ind]
                 wcs = [self.weights[self.pc_idx_dict[int(bx)][0]:self.pc_idx_dict[int(bx)][1]] for bx in batch_ind]
-                print("Data loading time:", time.time() - t)
                 
-                t = time.time()
                 point_clouds_batch, weights_batch = pad_pointclouds(pcs, wcs)
-                print("Padding time:", time.time() - t)
-         
-
+ 
                 if(self.matched_noise):
                     noise_samples, noise_weights = self.noise_point_clouds[batch_ind], self.noise_weights[batch_ind]
                     if(source_sample is not None):
@@ -358,7 +323,7 @@ class PascientFM(RiemannianWassersteinFlowMatching):
                     is_null_conditioning = None
 
                 subkey, key = random.split(key, 2)
-    
+
                 self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, conditioning_batch, noise_samples, noise_weights, is_null_conditioning, key = subkey)
 
                 self.params = self.state.params
@@ -379,5 +344,20 @@ class PascientFM(RiemannianWassersteinFlowMatching):
             print("\nTraining interrupted by user. The model state has been saved.")
 
         # Ensure state is unreplicated when returning, for compatibility with other methods
-        self.state = jax_utils.unreplicate(self.state)
+        #self.state = jax_utils.unreplicate(self.state)
         self.params = self.state.params
+        
+    def save(self, path):
+        """
+        Save the model state to the specified path using pickle.
+
+        :param path: (str) Path where the model state will be saved.
+        """
+        if hasattr(self, 'state'):
+            # Ensure we are saving the unreplicated state
+            state_to_save = self.state
+            with open(path, 'wb') as f:
+                f.write(serialization.to_bytes(state_to_save))
+            print(f"Model saved to {path}")
+        else:
+            print("Model state not found. Please train the model before saving.")

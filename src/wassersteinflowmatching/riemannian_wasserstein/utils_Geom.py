@@ -49,7 +49,7 @@ class torus:
         )
         
         # Return geodesic distance on n-torus
-        return jnp.sum(diff**2)
+        return jnp.sum(diff**2, axis=-1)
 
     def distance_matrix(self, P0, P1):
         # Normalize angles to [0, 2π)
@@ -506,3 +506,413 @@ class hyperbolic:
         
         # Project back to manifold
         return self.project_to_geometry(linear_mean)
+
+class SO3:
+    def project_to_geometry(self, P, use_cpu=False):
+        # Normalize to unit quaternion (S^3)
+        # P shape: (..., 4)
+        if use_cpu:
+            norm = np.linalg.norm(P, axis=-1, keepdims=True)
+            return np.nan_to_num(P / norm, nan=1.0/np.sqrt(P.shape[-1]))
+        norm = jnp.linalg.norm(P, axis=-1, keepdims=True)
+        return jnp.nan_to_num(P / norm, nan=1.0/jnp.sqrt(P.shape[-1]))
+
+    def distance(self, P0, P1):
+        # Geodesic distance on SO(3) with double cover handling
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+        
+        # Dot product
+        dot = jnp.sum(P0 * P1, axis=-1)
+        
+        # Account for double cover: q and -q are the same rotation
+        abs_dot = jnp.abs(dot)
+        abs_dot = jnp.clip(abs_dot, -1.0, 1.0)
+        
+        # Distance is 2 * arccos(|<q1, q2>|)
+        # Return squared distance as per other classes
+        return (2 * jnp.arccos(abs_dot))**2
+
+    def distance_matrix(self, P0, P1):
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+        
+        # Matrix of dot products
+        dot_mat = P0 @ P1.T
+        
+        abs_dot_mat = jnp.abs(dot_mat)
+        abs_dot_mat = jnp.clip(abs_dot_mat, -1.0, 1.0)
+        
+        return (2 * jnp.arccos(abs_dot_mat))**2
+
+    def interpolant(self, P0, P1, t):
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+        
+        dot = jnp.sum(P0 * P1, axis=-1)
+        
+        # Flip P1 if dot < 0 to take shortest path
+        sign = jnp.sign(dot)
+        sign = jnp.where(sign == 0, 1.0, sign)
+        P1 = P1 * sign[..., None]
+        
+        # Now standard SLERP on S^3
+        dot = jnp.abs(dot)
+        dot = jnp.clip(dot, -1.0, 1.0)
+        
+        theta = jnp.arccos(dot)
+        sin_theta = jnp.sin(theta)
+        
+        a = jnp.where(sin_theta < 1e-6, 1.0 - t, jnp.sin((1 - t) * theta) / sin_theta)
+        b = jnp.where(sin_theta < 1e-6, t, jnp.sin(t * theta) / sin_theta)
+        
+        return a[..., None] * P0 + b[..., None] * P1
+
+    def velocity(self, P0, P1, t):
+        P0 = self.project_to_geometry(P0)
+        P1 = self.project_to_geometry(P1)
+        
+        dot = jnp.sum(P0 * P1, axis=-1)
+        
+        sign = jnp.sign(dot)
+        sign = jnp.where(sign == 0, 1.0, sign)
+        P1 = P1 * sign[..., None]
+        
+        dot = jnp.abs(dot)
+        dot = jnp.clip(dot, -1.0, 1.0)
+        
+        theta = jnp.arccos(dot)
+        sin_theta = jnp.sin(theta)
+        
+        a = jnp.where(sin_theta < 1e-6, -1.0, -theta * jnp.cos((1 - t) * theta) / sin_theta)
+        b = jnp.where(sin_theta < 1e-6, 1.0, theta * jnp.cos(t * theta) / sin_theta)
+        
+        return a[..., None] * P0 + b[..., None] * P1
+
+    def tangent_norm(self, v, w, p):
+        p = self.project_to_geometry(p)
+        # Project to tangent space of S^3 at p
+        v_tan = v - jnp.sum(v * p, axis=-1, keepdims=True) * p
+        w_tan = w - jnp.sum(w * p, axis=-1, keepdims=True) * p
+        
+        return jnp.mean(jnp.square(v_tan - w_tan))
+
+    def exponential_map(self, p, v, delta_t):
+        # Exponential map on S^3
+        p = self.project_to_geometry(p)
+        
+        # Project v to tangent space
+        v = v - jnp.sum(v * p, axis=-1, keepdims=True) * p
+        
+        v_norm = jnp.linalg.norm(v, axis=-1, keepdims=True)
+        
+        def small_step():
+            step = p + v * delta_t
+            return self.project_to_geometry(step)
+            
+        def general_step():
+            theta = v_norm * delta_t
+            return jnp.cos(theta) * p + jnp.sin(theta) * (v / (v_norm + 1e-9))
+            
+        return jnp.where(v_norm < 1e-6, small_step(), general_step())
+
+    def weighted_mean(self, points, weights):
+        # Eigenvector method
+        weights = weights / (jnp.sum(weights) + 1e-9)
+        
+        # M = sum w_i q_i q_i^T
+        # points: (N, 4)
+        M = jnp.einsum('n,ni,nj->ij', weights, points, points)
+        
+        eigvals, eigvecs = jnp.linalg.eigh(M)
+        mean_q = eigvecs[:, -1]
+        
+        return self.project_to_geometry(mean_q)
+
+class SE3:
+    def __init__(self):
+        self.so3 = SO3()
+        self.euc = euclidean()
+
+    def project_to_geometry(self, P, use_cpu=False):
+        # trans is first (:3), rot is second (-3:)
+        rot = P[..., 3:]
+        trans = P[..., :3]
+        rot = self.so3.project_to_geometry(rot, use_cpu=use_cpu)
+        if use_cpu:
+            return np.concatenate([trans, rot], axis=-1)
+        return jnp.concatenate([trans, rot], axis=-1)
+
+    def distance(self, P0, P1):
+        rot0, trans0 = P0[..., 3:], P0[..., :3]
+        rot1, trans1 = P1[..., 3:], P1[..., :3]
+        
+        d_rot = self.so3.distance(rot0, rot1)
+        d_trans = self.euc.distance(trans0, trans1)
+        
+        return jnp.sum(d_rot) + d_trans
+
+    def distance_matrix(self, P0, P1):
+        # P0: (B1, ..., 7)
+        # P1: (B2, ..., 7)
+        
+        trans0 = P0[..., :3]
+        trans1 = P1[..., :3]
+        rot0 = P0[..., 3:]
+        rot1 = P1[..., 3:]
+        
+        # Translation distance matrix
+        # Expand for broadcasting: (B1, 1, ..., 3) and (1, B2, ..., 3)
+        diff_trans = trans0[:, None, ...] - trans1[None, :, ...]
+        # Sum over all dimensions starting from axis 2
+        d_trans = jnp.sum(diff_trans**2, axis=tuple(range(2, diff_trans.ndim)))
+        
+        # Rotation distance matrix
+        # Dot product: (B1, 1, ..., 4) * (1, B2, ..., 4) -> sum last axis
+        dot = jnp.sum(rot0[:, None, ...] * rot1[None, :, ...], axis=-1)
+        abs_dot = jnp.clip(jnp.abs(dot), -1.0, 1.0)
+        d_rot_sq = (2 * jnp.arccos(abs_dot))**2
+        
+        # Sum over all dimensions starting from axis 2 (the N dimensions)
+        d_rot = jnp.sum(d_rot_sq, axis=tuple(range(2, d_rot_sq.ndim)))
+        
+        return d_rot + d_trans
+
+    def interpolant(self, P0, P1, t):
+        rot0, trans0 = P0[..., 3:], P0[..., :3]
+        rot1, trans1 = P1[..., 3:], P1[..., :3]
+        
+        rot_t = self.so3.interpolant(rot0, rot1, t)
+        trans_t = self.euc.interpolant(trans0, trans1, t)
+        
+        return jnp.concatenate([trans_t, rot_t], axis=-1)
+
+    def velocity(self, P0, P1, t):
+        rot0, trans0 = P0[..., 3:], P0[..., :3]
+        rot1, trans1 = P1[..., 3:], P1[..., :3]
+        
+        rot_v = self.so3.velocity(rot0, rot1, t)
+        trans_v = self.euc.velocity(trans0, trans1, t)
+        
+        return jnp.concatenate([trans_v, rot_v], axis=-1)
+
+    def tangent_norm(self, v, w, p):
+        p_rot = p[..., 3:]
+        v_rot, v_trans = v[..., 3:], v[..., :3]
+        w_rot, w_trans = w[..., 3:], w[..., :3]
+        
+        p_rot = self.so3.project_to_geometry(p_rot)
+        v_rot_tan = v_rot - jnp.sum(v_rot * p_rot, axis=-1, keepdims=True) * p_rot
+        w_rot_tan = w_rot - jnp.sum(w_rot * p_rot, axis=-1, keepdims=True) * p_rot
+        
+        diff_rot = v_rot_tan - w_rot_tan
+        diff_trans = v_trans - w_trans
+        
+        diff = jnp.concatenate([diff_trans, diff_rot], axis=-1)
+        return jnp.mean(jnp.square(diff))
+
+    def exponential_map(self, p, v, delta_t):
+        p_rot, p_trans = p[..., 3:], p[..., :3]
+        v_rot, v_trans = v[..., 3:], v[..., :3]
+        
+        new_rot = self.so3.exponential_map(p_rot, v_rot, delta_t)
+        new_trans = self.euc.exponential_map(p_trans, v_trans, delta_t)
+        
+        return jnp.concatenate([new_trans, new_rot], axis=-1)
+
+    def weighted_mean(self, points, weights):
+        rot = points[..., 3:]
+        trans = points[..., :3]
+        
+        mean_rot = self.so3.weighted_mean(rot, weights)
+        mean_trans = self.euc.weighted_mean(trans, weights)
+        
+        return jnp.concatenate([mean_trans, mean_rot], axis=-1)
+
+class SE3_n(SE3):
+    def __init__(self, n):
+        super().__init__()
+        self.n = n
+
+    def project_to_geometry(self, P, use_cpu=False):
+        # P: (..., 7*n)
+        shape = P.shape
+        P = P.reshape(shape[:-1] + (self.n, 7))
+        trans = P[..., :3]
+        rot = P[..., 3:]
+        
+        rot = self.so3.project_to_geometry(rot, use_cpu=use_cpu)
+        
+        if use_cpu:
+            res = np.concatenate([trans, rot], axis=-1)
+        else:
+            res = jnp.concatenate([trans, rot], axis=-1)
+        return res.reshape(shape)
+
+    def distance(self, P0, P1, mask0=None, mask1=None):
+
+        if mask0 is None:
+            mask0 = jnp.ones(P0.shape[:-1] + (self.n,)) 
+        if mask1 is None:
+            mask1 = jnp.ones(P1.shape[:-1] + (self.n,))
+
+        mask_combined = mask0 * mask1
+
+        P0 = P0.reshape(P0.shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(P1.shape[:-1] + (self.n, 7))
+        
+        trans0, rot0 = P0[..., :3], P0[..., 3:]
+        trans1, rot1 = P1[..., :3], P1[..., 3:]
+        
+        d_trans = jnp.sum((trans0 - trans1)**2, axis=-1)
+        d_rot = self.so3.distance(rot0, rot1)
+        
+        dist_comp = d_trans + d_rot
+        
+        if mask0 is not None:
+            return jnp.sum(dist_comp * mask_combined, axis=-1)
+            
+        return jnp.sum(dist_comp, axis=-1)
+
+    def distance_matrix(self, P0, P1, mask0=None, mask1=None):
+
+        if mask0 is None:
+            mask0 = jnp.ones(P0.shape[:-1] + (self.n,)) 
+        if mask1 is None:
+            mask1 = jnp.ones(P1.shape[:-1] + (self.n,))
+
+        mask_outer = mask0[:, None, :] * mask1[None, :, :]
+
+        P0 = P0.reshape(P0.shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(P1.shape[:-1] + (self.n, 7))
+        
+        trans0 = P0[..., :3]
+        trans1 = P1[..., :3]
+        rot0 = P0[..., 3:]
+        rot1 = P1[..., 3:]
+        
+        # Translation
+        diff_trans = trans0[:, None, ...] - trans1[None, :, ...]
+        d_trans = jnp.sum(diff_trans**2, axis=-1)
+        
+        # Rotation
+        dot = jnp.sum(rot0[:, None, ...] * rot1[None, :, ...], axis=-1)
+        abs_dot = jnp.clip(jnp.abs(dot), -1.0, 1.0)
+        d_rot = (2 * jnp.arccos(abs_dot))**2
+        
+        dist_comp = d_trans + d_rot
+        dist_comp = dist_comp * mask_outer
+        
+        return jnp.sum(dist_comp, axis=-1)
+
+    def interpolant(self, P0, P1, t):
+        shape = P0.shape
+        P0 = P0.reshape(shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(shape[:-1] + (self.n, 7))
+        
+        trans0, rot0 = P0[..., :3], P0[..., 3:]
+        trans1, rot1 = P1[..., :3], P1[..., 3:]
+        
+        trans_t = self.euc.interpolant(trans0, trans1, t)
+        rot_t = self.so3.interpolant(rot0, rot1, t)
+        
+        res = jnp.concatenate([trans_t, rot_t], axis=-1)
+        return res.reshape(shape)
+
+    def velocity(self, P0, P1, t):
+        shape = P0.shape
+        P0 = P0.reshape(shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(shape[:-1] + (self.n, 7))
+        
+        trans0, rot0 = P0[..., :3], P0[..., 3:]
+        trans1, rot1 = P1[..., :3], P1[..., 3:]
+        
+        trans_v = self.euc.velocity(trans0, trans1, t)
+        rot_v = self.so3.velocity(rot0, rot1, t)
+        
+        res = jnp.concatenate([trans_v, rot_v], axis=-1)
+        return res.reshape(shape)
+
+    def tangent_norm(self, v, w, p, mask_p=None):
+        shape = p.shape
+        p = p.reshape(shape[:-1] + (self.n, 7))
+        v = v.reshape(shape[:-1] + (self.n, 7))
+        w = w.reshape(shape[:-1] + (self.n, 7))
+        
+        p_rot = p[..., 3:]
+        v_rot, v_trans = v[..., 3:], v[..., :3]
+        w_rot, w_trans = w[..., 3:], w[..., :3]
+        
+        p_rot = self.so3.project_to_geometry(p_rot)
+        
+        v_rot_tan = v_rot - jnp.sum(v_rot * p_rot, axis=-1, keepdims=True) * p_rot
+        w_rot_tan = w_rot - jnp.sum(w_rot * p_rot, axis=-1, keepdims=True) * p_rot
+        
+        diff_rot = v_rot_tan - w_rot_tan
+        diff_trans = v_trans - w_trans
+        
+        diff = jnp.concatenate([diff_trans, diff_rot], axis=-1)
+        sq_norm = jnp.square(diff)
+        
+        if mask_p is not None:
+            sq_norm = sq_norm * mask_p[..., None]
+            return jnp.mean(sq_norm)
+            
+        return jnp.mean(sq_norm)
+
+    def exponential_map(self, p, v, delta_t):
+        shape = p.shape
+        p = p.reshape(shape[:-1] + (self.n, 7))
+        v = v.reshape(shape[:-1] + (self.n, 7))
+        
+        p_trans, p_rot = p[..., :3], p[..., 3:]
+        v_trans, v_rot = v[..., :3], v[..., 3:]
+        
+        new_trans = self.euc.exponential_map(p_trans, v_trans, delta_t)
+        new_rot = self.so3.exponential_map(p_rot, v_rot, delta_t)
+        
+        res = jnp.concatenate([new_trans, new_rot], axis=-1)
+        return res.reshape(shape)
+
+    def weighted_mean(self, points, weights, mask=None):
+        N = points.shape[0]
+        points = points.reshape(N, self.n, 7)
+        
+        if mask is not None:
+            mask = mask.reshape(N, self.n, 7)[..., 0]
+            w_comp = weights[:, None] * mask
+            w_sum = jnp.sum(w_comp, axis=0) + 1e-9
+            w_norm = w_comp / w_sum[None, :]
+            
+            trans = points[..., :3]
+            mean_trans = jnp.sum(trans * w_norm[..., None], axis=0)
+            
+            rot = points[..., 3:]
+            M = jnp.einsum('nk,nki,nkj->kij', w_norm, rot, rot)
+            
+            eigvals, eigvecs = jnp.linalg.eigh(M)
+            mean_rot = eigvecs[..., -1]
+            mean_rot = self.so3.project_to_geometry(mean_rot)
+            
+            res_val = jnp.concatenate([mean_trans, mean_rot], axis=-1)
+            return res_val.flatten()
+        
+        trans = points[..., :3]
+        rot = points[..., 3:]
+        
+        w_sum = jnp.sum(weights) + 1e-9
+        w_expanded = weights[:, None, None]
+        mean_trans = jnp.sum(trans * w_expanded, axis=0) / w_sum
+        
+        weights_norm = weights / w_sum
+        M = jnp.einsum('n,nki,nkj->kij', weights_norm, rot, rot)
+        
+        eigvals, eigvecs = jnp.linalg.eigh(M)
+        mean_rot = eigvecs[..., -1]
+        
+        mean_rot = self.so3.project_to_geometry(mean_rot)
+        
+        res = jnp.concatenate([mean_trans, mean_rot], axis=-1)
+        return res.reshape(self.n * 7)
+
+        

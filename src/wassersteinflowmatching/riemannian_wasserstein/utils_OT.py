@@ -8,7 +8,7 @@ import numpy as np
 from tqdm import tqdm
 
 
-def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_func, num_calc=100, sample_size=2048, noise_point_clouds=None, noise_weights=None, sinkhorn_limit=5000, inner_iterations=10):
+def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_func, num_calc=100, sample_size=2048, noise_point_clouds=None, noise_weights=None, sinkhorn_limit=5000, inner_iterations=10, feature_masks=None, noise_feature_masks=None):
     """
     Find the minimum number of iterations for which at least 80% of OT calculations converge.
 
@@ -28,6 +28,8 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
         noise_weights (list, optional): A list of corresponding weights for noise point clouds. Defaults to None.
         sinkhorn_limit (int): Maximum iterations to test.
         inner_iterations (int): Check convergence every N steps.
+        feature_masks (list, optional): A list of feature masks for each point cloud. Defaults to None.
+        noise_feature_masks (list, optional): A list of feature masks for noise point clouds. Defaults to None.
 
     Returns:
         int: The recommended number of iterations.
@@ -38,6 +40,10 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
     
     batch_x_list, batch_y_list = [], []
     batch_a_list, batch_b_list = [], []
+    batch_mx_list, batch_my_list = [], []
+
+    max_pc_size = max([len(pc) for pc in point_clouds])
+    sample_size = min(sample_size, max_pc_size)
 
     for _ in range(num_calc):
         # -- Selection Logic --
@@ -46,10 +52,14 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
             idx2 = np.random.randint(0, num_noise_clouds)
             x, a = point_clouds[idx1], weights[idx1]
             y, b = noise_point_clouds[idx2], noise_weights[idx2]
+            mx = feature_masks[idx1] if feature_masks is not None else None
+            my = noise_feature_masks[idx2] if noise_feature_masks is not None else None
         else:
             idx1, idx2 = np.random.choice(num_clouds, 2, replace=False)
             x, a = point_clouds[idx1], weights[idx1]
             y, b = point_clouds[idx2], weights[idx2]
+            mx = feature_masks[idx1] if feature_masks is not None else None
+            my = feature_masks[idx2] if feature_masks is not None else None
 
         # -- Downsampling / Upsampling Logic --
         # Ensure fixed size for vmap
@@ -58,12 +68,15 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
             replace = len(x) < sample_size
             ix = np.random.choice(len(x), sample_size, replace=replace)
             x, a = x[ix], a[ix]
-        
+            if( mx is not None ):
+                mx = mx[ix]
+
         if len(y) != sample_size:
             replace = len(y) < sample_size
             iy = np.random.choice(len(y), sample_size, replace=replace)
             y, b = y[iy], b[iy]
-            
+            if( my is not None ):
+                my = my[iy]
         # Normalize weights
         a = a / np.sum(a)
         b = b / np.sum(b)
@@ -72,37 +85,66 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
         batch_y_list.append(y)
         batch_a_list.append(a)
         batch_b_list.append(b)
+        if mx is not None:
+            batch_mx_list.append(mx)
+        if my is not None:
+            batch_my_list.append(my)
 
     # Convert to JAX arrays
     batch_x = jnp.array(np.stack(batch_x_list))
     batch_y = jnp.array(np.stack(batch_y_list))
     batch_a = jnp.array(np.stack(batch_a_list))
     batch_b = jnp.array(np.stack(batch_b_list))
+    
+    if feature_masks is not None:
+        batch_mx = jnp.array(np.stack(batch_mx_list))
+        batch_my = jnp.array(np.stack(batch_my_list))
 
     # --------------------------------------------------------------------
     # 2. DEFINING THE VMAP SOLVER (JAX/GPU)
     # --------------------------------------------------------------------
     
-    def solve_one(x, y, a, b):
-        distmat = distance_matrix_func(x, y)
-        geom = ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost')
+    if feature_masks is not None:
+        def solve_one(x, y, a, b, mx, my):
+            distmat = distance_matrix_func(x, y, mx, my)
+            geom = ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost')
+            
+            out = linear.solve(
+                geom,
+                a=a,
+                b=b,
+                min_iterations=0, 
+                max_iterations=sinkhorn_limit,
+                inner_iterations=inner_iterations, 
+                lse_mode=lse_mode,
+            )
+            return out.errors
         
-        out = linear.solve(
-            geom,
-            a=a,
-            b=b,
-            min_iterations=0, 
-            max_iterations=sinkhorn_limit,
-            inner_iterations=inner_iterations, 
-            lse_mode=lse_mode,
-        )
-        return out.errors
+        # JIT compile and VMAP over the 0-th dimension (batch dimension)
+        solve_batch = jax.jit(jax.vmap(solve_one, in_axes=(0, 0, 0, 0, 0, 0)))
+        # Run the batch computation
+        errors = solve_batch(batch_x, batch_y, batch_a, batch_b, batch_mx, batch_my)
+    else:
+        def solve_one(x, y, a, b):
+            distmat = distance_matrix_func(x, y)
+            geom = ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost')
+            
+            out = linear.solve(
+                geom,
+                a=a,
+                b=b,
+                min_iterations=0, 
+                max_iterations=sinkhorn_limit,
+                inner_iterations=inner_iterations, 
+                lse_mode=lse_mode,
+            )
+            return out.errors
 
-    # JIT compile and VMAP over the 0-th dimension (batch dimension)
-    solve_batch = jax.jit(jax.vmap(solve_one, in_axes=(0, 0, 0, 0)))
- 
-    # Run the batch computation
-    errors = solve_batch(batch_x, batch_y, batch_a, batch_b)
+        # JIT compile and VMAP over the 0-th dimension (batch dimension)
+        solve_batch = jax.jit(jax.vmap(solve_one, in_axes=(0, 0, 0, 0)))
+    
+        # Run the batch computation
+        errors = solve_batch(batch_x, batch_y, batch_a, batch_b)
 
     # --------------------------------------------------------------------
     # 3. ANALYZING THE TRACE
@@ -120,10 +162,10 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
     convergence_rates = jnp.mean(is_converged.astype(float), axis=0)
     
     # Find the first index where rate >= 0.8
-    valid_indices = convergence_rates >= 0.8
+    valid_indices = convergence_rates >= 0.95
     
     if not jnp.any(valid_indices):
-        print(f"WARNING: Convergence rate never reached 80% (Max rate: {jnp.max(convergence_rates):.2f}).")
+        print(f"WARNING: Convergence rate never reached 95% (Max rate: {jnp.max(convergence_rates):.2f}).")
         return sinkhorn_limit
 
     first_success_index = jnp.argmax(valid_indices)
@@ -131,7 +173,7 @@ def auto_find_num_iter(point_clouds, weights, eps, lse_mode, distance_matrix_fun
     # Convert index back to iteration count
     recommended_iter = (first_success_index + 1) * inner_iterations
     
-    print(f"INFO: Found sufficient convergence (80%) at {recommended_iter} iterations.")
+    print(f"INFO: Found sufficient convergence (95%) at {recommended_iter} iterations.")
     
     return int(recommended_iter)
 
@@ -164,10 +206,10 @@ def auto_find_num_iter_matrix(distance_matrix, eps=0.01, lse_mode=True, sinkhorn
     convergence_rates = jnp.mean(is_converged.astype(float), axis=0)
     
     # Find the first index where rate >= 0.8
-    valid_indices = convergence_rates >= 0.8
+    valid_indices = convergence_rates >= 0.95
     
     if not jnp.any(valid_indices):
-            print(f"WARNING: Convergence rate never reached 80% (Max rate: {jnp.max(convergence_rates):.2f}).")
+            print(f"WARNING: Convergence rate never reached 95% (Max rate: {jnp.max(convergence_rates):.2f}).")
             return sinkhorn_limit
 
     first_success_index = jnp.argmax(valid_indices)
@@ -175,7 +217,7 @@ def auto_find_num_iter_matrix(distance_matrix, eps=0.01, lse_mode=True, sinkhorn
     return int(recommended_iter)
 
 
-def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, noise_weights, ot_mat_jit, eps, lse_mode, num_batches=16, batch_size_ot=32, sample_size=2048, key=None):
+def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, noise_weights, ot_mat_jit, eps, lse_mode, num_batches=16, batch_size_ot=32, sample_size=512, key=None, feature_masks=None, noise_feature_masks=None):
     if key is None:
         key = random.key(0)
     
@@ -188,13 +230,23 @@ def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, nois
     real_pcs = point_clouds[idx] 
     real_weights = weights[idx]
     
+    real_masks = None
+    if feature_masks is not None:
+        real_masks = feature_masks[idx]
+
     # Sample noise point clouds
     idx_noise = random.choice(subkey2, noise_point_clouds.shape[0], shape=(total_pc,))
     noise_pcs = noise_point_clouds[idx_noise]
     noise_weights_batch = noise_weights[idx_noise]
     
+    noise_masks = None
+    if noise_feature_masks is not None:
+        noise_masks = noise_feature_masks[idx_noise]
+    
     # Downsampling logic
     current_n_points = point_clouds.shape[1]
+    sample_size = min(sample_size, current_n_points)
+
     if sample_size is not None and sample_size != current_n_points:
         replace = current_n_points < sample_size
         
@@ -204,12 +256,14 @@ def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, nois
             # Normalize weights
             new_w = w[idx]
             new_w = new_w / jnp.sum(new_w)
+
             return pc[idx], new_w
 
         key, subkey = random.split(key)
         keys = random.split(subkey, total_pc)
         real_pcs, real_weights = jax.vmap(get_samples)(real_pcs, real_weights, keys)
-        
+
+
         key, subkey = random.split(key)
         keys = random.split(subkey, total_pc)
         noise_pcs, noise_weights_batch = jax.vmap(get_samples)(noise_pcs, noise_weights_batch, keys)
@@ -218,22 +272,57 @@ def auto_find_num_iter_minibatch(point_clouds, weights, noise_point_clouds, nois
     real_weights_reshaped = real_weights.reshape(num_batches, batch_size_ot, *real_weights.shape[1:])
     noise_pcs_reshaped = noise_pcs.reshape(num_batches, batch_size_ot, *noise_pcs.shape[1:])
     noise_weights_reshaped = noise_weights_batch.reshape(num_batches, batch_size_ot, *noise_weights_batch.shape[1:])
+    
+    real_masks_reshaped = None
+    if real_masks is not None:
+        real_masks_reshaped = real_masks.reshape(num_batches, batch_size_ot, *real_masks.shape[1:])
+        real_masks_reshaped = real_masks_reshaped[:, :, :real_pcs_reshaped.shape[2], :]
+    
+    noise_masks_reshaped = None
+    if noise_masks is not None:
+        noise_masks_reshaped = noise_masks.reshape(num_batches, batch_size_ot, *noise_masks.shape[1:])
+        noise_masks_reshaped = noise_masks_reshaped[:, :, :real_pcs_reshaped.shape[2], :]
 
-    def compute_batch_op(operand):
-        pcs, p_w, ncs, n_w = operand
-        
-        def compute_row_op(i):
-            p_i = pcs[i]
-            w_i = p_w[i]
-            
-            p_batch = jnp.broadcast_to(p_i[None, ...], ncs.shape)
-            w_batch = jnp.broadcast_to(w_i[None, ...], n_w.shape)
-            
-            return ot_mat_jit([p_batch, w_batch], [ncs, n_w])
-            
-        return jax.lax.map(compute_row_op, jnp.arange(batch_size_ot))
+    if real_masks is not None and noise_masks is not None:
 
-    D = jax.lax.map(compute_batch_op, (real_pcs_reshaped, real_weights_reshaped, noise_pcs_reshaped, noise_weights_reshaped))
+        print(f"pc shapes for auto sinkhorn matrix: {real_pcs_reshaped.shape}, noise shapes: {noise_pcs_reshaped.shape}")
+        print(f"weight shapes for auto sinkhorn matrix: {real_weights_reshaped.shape}, noise weight shapes: {noise_weights_reshaped.shape}")
+        print(f"mask shapes for auto sinkhorn matrix: {real_masks_reshaped.shape}, noise mask shapes: {noise_masks_reshaped.shape}")
+
+        def compute_batch_op(operand):
+            pcs, p_w, p_m, ncs, n_w, n_m = operand
+            
+            def compute_row_op(i):
+                p_i = pcs[i]
+                w_i = p_w[i]
+                m_i = p_m[i]
+                
+                p_batch = jnp.broadcast_to(p_i[None, ...], ncs.shape)
+                w_batch = jnp.broadcast_to(w_i[None, ...], n_w.shape)
+                m_batch = jnp.broadcast_to(m_i[None, ...], n_m.shape)
+                
+                return ot_mat_jit([p_batch, w_batch, m_batch], [ncs, n_w, n_m])
+                
+            return jax.lax.map(compute_row_op, jnp.arange(batch_size_ot))
+
+        D = jax.lax.map(compute_batch_op, (real_pcs_reshaped, real_weights_reshaped, real_masks_reshaped, noise_pcs_reshaped, noise_weights_reshaped, noise_masks_reshaped))
+    else:
+
+        def compute_batch_op(operand):
+            pcs, p_w, ncs, n_w = operand
+            
+            def compute_row_op(i):
+                p_i = pcs[i]
+                w_i = p_w[i]
+                
+                p_batch = jnp.broadcast_to(p_i[None, ...], ncs.shape)
+                w_batch = jnp.broadcast_to(w_i[None, ...], n_w.shape)
+                
+                return ot_mat_jit([p_batch, w_batch], [ncs, n_w])
+                
+            return jax.lax.map(compute_row_op, jnp.arange(batch_size_ot))
+
+        D = jax.lax.map(compute_batch_op, (real_pcs_reshaped, real_weights_reshaped, noise_pcs_reshaped, noise_weights_reshaped))
 
     return auto_find_num_iter_matrix(D, eps=eps, lse_mode=lse_mode)
 
@@ -423,12 +512,23 @@ def get_assignments_entropic(P, pc_x, pc_y, log_map_func, exp_map_function):
     return assignments, 0
 
 
-
 def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = False, num_iteration = 200): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
+    if len(pc_x) == 3:
+        pc_x, w_x, m_x = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+        m_x = None
 
-    distmat = distance_matrix_func(pc_x, pc_y)
+    if len(pc_y) == 3:
+        pc_y, w_y, m_y = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+        m_y = None
+
+    if m_x is not None and m_y is not None:
+        distmat = distance_matrix_func(pc_x, pc_y, m_x, m_y)
+    else:
+        distmat = distance_matrix_func(pc_x, pc_y)
     
     ot_solve = linear.solve(
         ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost'),
@@ -441,19 +541,39 @@ def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = Fals
     ot_matrix = ot_solve.matrix
     return(ot_matrix, ot_solve)
 
-
 def transport_plan_random(pc_x, pc_y): 
     # return a random transport plan, where each point in pc_x is assigned to a random point in pc_y (weighted by w_y)
 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
+    if len(pc_x) == 3:
+        pc_x, w_x, _ = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
 
-    # Create a random transport plan based on marginals
-    # P_ij = w_x[i] * w_y[j]
-    # This corresponds to the independent coupling (random assignment weighted by target mass)
+    if len(pc_y) == 3:
+        pc_y, w_y, _ = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+
     ot_matrix = jnp.outer(w_x, w_y)
-    
-    
+    return(ot_matrix, 0)
+
+
+def transport_plan_matched(pc_x, pc_y): 
+    # return a random transport plan, where each point in pc_x is assigned to a random point in pc_y (weighted by w_y)
+
+    if len(pc_x) == 3:
+        pc_x, w_x, _ = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+
+    if len(pc_y) == 3:
+        pc_y, w_y, _ = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+
+    # transport plan is the identity matrix
+
+    ot_matrix = jnp.eye(pc_x.shape[0])
     return(ot_matrix, 0)
 
 
@@ -548,8 +668,15 @@ def matrix_sqrt(A):
 
 
 def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False, num_iteration = 200): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
+    if len(pc_x) == 3:
+        pc_x, w_x, _ = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+
+    if len(pc_y) == 3:
+        pc_y, w_y, _ = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
 
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
@@ -562,8 +689,15 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False, num_iteration 
 
 
 def euclidean_distance(pc_x, pc_y): 
-    pc_x, w_x = pc_x[0], pc_x[1]
-    pc_y, w_y = pc_y[0], pc_y[1]
+    if len(pc_x) == 3:
+        pc_x, w_x, _ = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+
+    if len(pc_y) == 3:
+        pc_y, w_y, _ = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
 
     dist_max = jnp.mean(jnp.square(pc_x[:, None, :] - pc_y[None, :, :]), axis = -1)
     weight_mat = jnp.outer(w_x, w_y)
@@ -573,25 +707,78 @@ def euclidean_distance(pc_x, pc_y):
 
 def random_distance(pc_x, pc_y, distance_matrix_func):
     
-    pc_x, w_x = pc_x
-    pc_y, w_y = pc_y
+    if len(pc_x) == 3:
+        pc_x, w_x, m_x = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+        m_x = None
 
-    pairwise_dist = distance_matrix_func(pc_x, pc_y)
+    if len(pc_y) == 3:
+        pc_y, w_y, m_y = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+        m_y = None
+
+    if m_x is not None and m_y is not None:
+        pairwise_dist = distance_matrix_func(pc_x, pc_y, m_x, m_y)
+    else:
+        pairwise_dist = distance_matrix_func(pc_x, pc_y)
 
     weight_mat = jnp.outer(w_x, w_y)
     dist = jnp.sum(pairwise_dist * weight_mat)
     return(dist)
 
 
+def matched_distance(pc_x, pc_y, distance_func):
+    
+    if len(pc_x) == 3:
+        pc_x, w_x, m_x = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+        m_x = None
+
+    if len(pc_y) == 3:
+        pc_y, w_y, m_y = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+        m_y = None
+
+    # assert that w_x and w_y are equal
+
+
+    if m_x is not None and m_y is not None:
+        pairwise_dist = distance_func(pc_x, pc_y, m_x, m_y)
+    else:
+        pairwise_dist = distance_func(pc_x, pc_y)
+
+    # take only the diagonal elements where both weights are non-zero
+
+    matched_dist = jnp.sum(pairwise_dist * w_x)
+    return matched_dist
+
+
+
 def chamfer_distance(pc_x, pc_y, distance_matrix_func):
     
-    pc_x, w_x = pc_x
-    pc_y, w_y = pc_y
+    if len(pc_x) == 3:
+        pc_x, w_x, m_x = pc_x
+    else:
+        pc_x, w_x = pc_x[0], pc_x[1]
+        m_x = None
+
+    if len(pc_y) == 3:
+        pc_y, w_y, m_y = pc_y
+    else:
+        pc_y, w_y = pc_y[0], pc_y[1]
+        m_y = None
 
     w_x_bool = w_x > 0
     w_y_bool = w_y > 0
 
-    pairwise_dist = distance_matrix_func(pc_x, pc_y)
+    if m_x is not None and m_y is not None:
+        pairwise_dist = distance_matrix_func(pc_x, pc_y, m_x, m_y)
+    else:
+        pairwise_dist = distance_matrix_func(pc_x, pc_y)
 
 
 
