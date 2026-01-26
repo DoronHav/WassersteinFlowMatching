@@ -147,6 +147,7 @@ def get_ca_trajectory(h5_path, temperature='320', replica='0'):
         # The 'name' field contains atom names like 'CA', 'N', 'C', 'O', etc.
         atom_names = domain['pdbProteinAtoms'][()].decode('utf-8').split('\n')[1:-3] # remove header and footer
         atomtypes = [line.split()[2] for line in atom_names]
+        print (len(atom_names), len(atomtypes))
         ca_indices = np.where(np.array(atomtypes) == 'CA')[0]
         n_indices = np.where(np.array(atomtypes) == 'N')[0]
         c_indices = np.where(np.array(atomtypes) == 'C')[0]
@@ -158,8 +159,43 @@ def get_ca_trajectory(h5_path, temperature='320', replica='0'):
         ca_coords = coords[:, ca_indices, :]
         n_coords = coords[:, n_indices, :]
         c_coords = coords[:, c_indices, :]
+
+        # get amino acid residue sequence as a string
         
-    return ca_coords, n_coords, c_coords, domain_id
+        res_mapper = {
+            'ALA': 'A',  # Alanine
+            'ARG': 'R',  # Arginine
+            'ASN': 'N',  # Asparagine
+            'ASP': 'D',  # Aspartic acid
+            'CYS': 'C',  # Cysteine
+            'GLN': 'Q',  # Glutamine
+            'GLU': 'E',  # Glutamic acid
+            'GLY': 'G',  # Glycine
+            'HIS': 'H',  # Histidine
+            'ILE': 'I',  # Isoleucine
+            'LEU': 'L',  # Leucine
+            'LYS': 'K',  # Lysine
+            'MET': 'M',  # Methionine
+            'PHE': 'F',  # Phenylalanine
+            'PRO': 'P',  # Proline
+            'SER': 'S',  # Serine
+            'THR': 'T',  # Threonine
+            'TRP': 'W',  # Tryptophan
+            'TYR': 'Y',  # Tyrosine
+            'VAL': 'V',  # Valine
+            # Protonation states (common in MD simulations)
+            'HSD': 'H',  # Histidine (delta protonated)
+            'HSE': 'H',  # Histidine (epsilon protonated)
+            'HSP': 'H',  # Histidine (doubly protonated)
+            'HID': 'H',  # Alternative naming
+            'HIE': 'H',
+            'HIP': 'H',
+        }
+        aa_mapper = lambda res_list: list(map(lambda res : res_mapper[res], res_list))
+        sequence = domain['resname'][()].astype(str)[ca_indices].tolist()
+        sequence = "".join(aa_mapper(sequence))
+        
+    return ca_coords, n_coords, c_coords, domain_id, sequence
 
 import jax.numpy as jnp
 import numpy as np
@@ -230,3 +266,6 @@ def save_trajectory_pdb(coords, filename):
             
             f.write("ENDMDL\n")
         f.write("END\n")
+
+def tic_plot():
+    pass
