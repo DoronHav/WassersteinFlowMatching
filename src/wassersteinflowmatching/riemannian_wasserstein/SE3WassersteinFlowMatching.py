@@ -52,7 +52,6 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
             n_res = pc.shape[-1] // 7
             # Create temp geometry for projection
             temp_geom = utils_Geom.SE3_n(n=n_res)
-            mask = self.masks[i]
             
             # Project
             proj_pc = np.asarray(temp_geom.project_to_geometry(pc, use_cpu=True))
@@ -78,7 +77,8 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
         # Initialize main geometry with max_n (from padded data)
         max_dim = self.point_clouds.shape[-1]
         n_features = max_dim // 7
-        self.geom_utils = utils_Geom.SE3_n(n=n_features)
+
+        self.geom_utils = getattr(utils_Geom, self.geom)(n = n_features)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
         # Setup vmaps
@@ -94,7 +94,7 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
         if(self.noise_geom != self.geom):
             print(f"Using {self.noise_geom} geometry for noise instead of {self.geom}")
             self.noise_geom = self.config.noise_geom
-            self.noise_proj_to_geometry = getattr(utils_Geom, self.noise_geom)().project_to_geometry 
+            self.noise_proj_to_geometry = getattr(utils_Geom, self.noise_geom)(n = n_features).project_to_geometry 
         else:
             print(f"Using {self.noise_geom} geometry for noise")
             self.noise_proj_to_geometry = self.project_to_geometry  
@@ -354,6 +354,13 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
             if(self.monge_map != 'rounded_matching' and self.monge_map != 'matched'):
                 noise_weights = noise_weights[noise_ind]
             noise_masks = noise_masks[noise_ind]
+
+        # set noise samples where noise_masks == 0 to zero
+
+        # noise is n_x, n_points, n_residues*7
+        # noise_masks is n_x, n_points, n_residues
+        noise_samples = noise_samples * jnp.repeat(noise_masks, 7, axis=-1)
+
         # Time random.uniform for interpolates_time
         interpolates_time = random.uniform(subkey_t, (point_clouds_batch.shape[0],), minval=0.0, maxval=1.0)
 
@@ -372,8 +379,13 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
 
         point_cloud_interpolates = self.interpolant_vmap(noise_samples, assigned_points, 1-interpolates_time)
         point_cloud_velocity = self.interpolant_velocity_vmap(noise_samples, assigned_points, 1-interpolates_time)
-        # Time interpolation computation
+  
 
+        # set point_cloud_interpolates and point_cloud_velocity to where masks_batch == 0 to zero
+
+        point_cloud_interpolates = point_cloud_interpolates * jnp.repeat(masks_batch, 7, axis=-1)
+        point_cloud_velocity = point_cloud_velocity * jnp.repeat(masks_batch, 7, axis=-1)
+        
         subkey, key = random.split(key)
 
         def loss_fn(params):
@@ -386,6 +398,9 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
                                             is_null_conditioning = is_null_conditioning,
                                             deterministic = False, 
                                             dropout_rng = subkey)
+            # set predicted_flow to zero where masks_batch == 0
+            predicted_flow = predicted_flow * jnp.repeat(masks_batch, 7, axis=-1)
+            
             error = self.loss_func_vmap(predicted_flow, -point_cloud_velocity, point_cloud_interpolates, masks_batch) * noise_weights
 
             loss = jnp.mean(jnp.sum(error, axis=1))
@@ -524,6 +539,65 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
 
 
 
+    @partial(jit, static_argnums=(0,))
+    def get_flow(self, params, point_clouds, weights, masks, t, dt, conditioning=None, is_null_conditioning=None):
+        if point_clouds.ndim == 2:
+            point_clouds = point_clouds[None, :, :]
+            weights = weights[None, :]
+            masks = masks[None, :, :]
+
+        # set point_clouds where masks == 0 to zero
+        point_clouds = point_clouds * jnp.repeat(masks, 7, axis=-1)
+        
+        if conditioning is not None:
+            if is_null_conditioning is None:
+                is_null_conditioning = jnp.isnan(conditioning).any(axis=-1)
+            
+            conditioning = jnp.where(jnp.isnan(conditioning), 0.0, conditioning)
+
+            cond_flow = self.FlowMatchingModel.apply(
+                {"params": params},
+                point_cloud=point_clouds,
+                t=t * jnp.ones(point_clouds.shape[0]),
+                masks=weights > 0,
+                conditioning=conditioning,
+                is_null_conditioning=is_null_conditioning,
+                deterministic=True
+            )
+
+            if(self.cfg):
+                uncond_flow = self.FlowMatchingModel.apply(
+                    {"params": params},
+                    point_cloud=point_clouds,
+                    t=t * jnp.ones(point_clouds.shape[0]),
+                    masks=weights > 0,
+                    conditioning=conditioning,
+                    is_null_conditioning=jnp.ones(point_clouds.shape[0], dtype=bool),
+                    deterministic=True
+                )
+
+
+                flow = uncond_flow + self.w_cfg * (cond_flow - uncond_flow)
+            else:
+                flow = cond_flow
+        else:
+
+            flow = self.FlowMatchingModel.apply(
+                {"params": params},
+                point_cloud=point_clouds,
+                t=t * jnp.ones(point_clouds.shape[0]),
+                masks=weights > 0,
+                deterministic=True
+            )
+
+        update = self.exponential_map_vmap(point_clouds, flow, -dt)
+        
+        # set update to 0 where masks == 0
+
+        update = update * jnp.repeat(masks, 7, axis=-1)
+
+        return update
+    
     def generate_samples(self, size=None, num_samples=10, timesteps=100, generate_conditioning=None, init_noise=None, max_size = None, n_residues=None, key=random.key(0)):
         """
         Generate samples from the learned flow
@@ -555,7 +629,7 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
             else:
                 generate_conditioning = jnp.array(generate_conditioning)
                 if generate_conditioning.ndim == 1:
-                    generate_conditioning = generate_conditioning[:, None]
+                    generate_conditioning = generate_conditioning[None, :]
                 
                 if generate_conditioning.shape[0] == 1 and num_samples > 1:
                      generate_conditioning = jnp.repeat(generate_conditioning, num_samples, axis=0)
@@ -570,8 +644,13 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
         if n_residues is not None:
             n_features = self.space_dim // 7
             # Create mask for first n_residues
-            mask_indices = jnp.arange(n_features) < n_residues
-            masks = jnp.tile(mask_indices[None, None, :], (num_samples, size, 1))
+            n_residues = jnp.array(n_residues)
+            if n_residues.ndim == 0:
+                mask_indices = jnp.arange(n_features) < n_residues
+                masks = jnp.tile(mask_indices[None, None, :], (num_samples, size, 1))
+            else:
+                mask_indices = jnp.arange(n_features)[None, :] < n_residues[:, None]
+                masks = jnp.tile(mask_indices[:, None, :], (1, size, 1))
         else:
             subkey, key = random.split(key)
             # Sample random masks from training distribution
@@ -601,19 +680,19 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
             max_size = min(max_size, noise.shape[1])
         
         # reorder noise and noise_weights to have the valid points first
-        def reorder_points(single_noise, single_weights):
+        def reorder_points(single_noise, single_weights, single_masks):
             sorted_indices = jnp.argsort(single_weights > 0)[::-1]
             reordered_noise = jnp.take(single_noise, sorted_indices, axis=0)
             reordered_weights = jnp.take(single_weights, sorted_indices, axis=0)
-            return reordered_noise[:max_size, :], reordered_weights[:max_size]
+            reordered_masks = jnp.take(single_masks, sorted_indices, axis=0)
+            return reordered_noise[:max_size, :], reordered_weights[:max_size], reordered_masks[:max_size, :]
         
-        noise, noise_weights = jax.vmap(reorder_points, in_axes=(0, 0))(noise, noise_weights)
-
+        noise, noise_weights, masks = jax.vmap(reorder_points, in_axes=(0, 0, 0))(noise, noise_weights, masks)
         dt = 1 / timesteps
 
         def step_fn(carry, t):
             current_noise = carry
-            next_noise = self.get_flow(self.params, current_noise, noise_weights, t, dt, generate_conditioning)
+            next_noise = self.get_flow(self.params, current_noise, noise_weights, masks, t, dt, generate_conditioning)
             return next_noise, next_noise
 
         timesteps_array = jnp.linspace(1, dt, timesteps)
@@ -621,5 +700,5 @@ class SE3WassersteinFlowMatching(RiemannianWassersteinFlowMatching):
 
         if generate_conditioning is None:
             return all_noises, noise_weights, masks
-        return all_noises, noise_weights, generate_conditioning, masks
+        return all_noises, noise_weights, masks, generate_conditioning
 

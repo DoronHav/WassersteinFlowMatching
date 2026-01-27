@@ -786,21 +786,21 @@ class SE3_n(SE3):
         P0 = P0.reshape(P0.shape[:-1] + (self.n, 7))
         P1 = P1.reshape(P1.shape[:-1] + (self.n, 7))
         
-        trans0 = P0[..., :3]
-        trans1 = P1[..., :3]
-        rot0 = P0[..., 3:]
-        rot1 = P1[..., 3:]
+        trans0 = P0[..., :3] # nx, n_residues, 3
+        trans1 = P1[..., :3] # ny, n_residues, 3
+        rot0 = P0[..., 3:] # nx, n_residues, 4
+        rot1 = P1[..., 3:] # ny, n_residues, 4
         
         # Translation
         diff_trans = trans0[:, None, ...] - trans1[None, :, ...]
-        d_trans = jnp.sum(diff_trans**2, axis=-1)
+        d_trans = jnp.sum(diff_trans**2, axis=-1) #n_x, n_y, n_residues
         
         # Rotation
-        dot = jnp.sum(rot0[:, None, ...] * rot1[None, :, ...], axis=-1)
-        abs_dot = jnp.clip(jnp.abs(dot), -1.0, 1.0)
-        d_rot = (2 * jnp.arccos(abs_dot))**2
+        dot = jnp.sum(rot0[:, None, ...] * rot1[None, :, ...], axis=-1) # n_x, n_y, n_residues
+        abs_dot = jnp.clip(jnp.abs(dot), -1.0, 1.0) # n_x, n_y, n_residues
+        d_rot = (2 * jnp.arccos(abs_dot))**2 # n_x, n_y, n_residues
         
-        dist_comp = d_trans + d_rot
+        dist_comp = d_trans + d_rot # n_x, n_y, n_residues
         dist_comp = dist_comp * mask_outer
         
         return jnp.sum(dist_comp, axis=-1)
@@ -839,9 +839,9 @@ class SE3_n(SE3):
         v = v.reshape(shape[:-1] + (self.n, 7))
         w = w.reshape(shape[:-1] + (self.n, 7))
         
-        p_rot = p[..., 3:]
-        v_rot, v_trans = v[..., 3:], v[..., :3]
-        w_rot, w_trans = w[..., 3:], w[..., :3]
+        p_rot = p[..., 3:] # n_x, n_residues, 4
+        v_rot, v_trans = v[..., 3:], v[..., :3] # n_x, n_residues, 4/3
+        w_rot, w_trans = w[..., 3:], w[..., :3] # n_x, n_residues, 4/3
         
         p_rot = self.so3.project_to_geometry(p_rot)
         
@@ -851,9 +851,10 @@ class SE3_n(SE3):
         diff_rot = v_rot_tan - w_rot_tan
         diff_trans = v_trans - w_trans
         
-        diff = jnp.concatenate([diff_trans, diff_rot], axis=-1)
-        sq_norm = jnp.square(diff)
+        diff = jnp.concatenate([diff_trans, diff_rot], axis=-1) # n_x, n_residues, 7
+        sq_norm = jnp.square(diff) # n_x, n_residues, 7
         
+        # mask_p is of shape n_x, n_residues
         if mask_p is not None:
             sq_norm = sq_norm * mask_p[..., None]
             return jnp.mean(sq_norm)
@@ -914,5 +915,91 @@ class SE3_n(SE3):
         
         res = jnp.concatenate([mean_trans, mean_rot], axis=-1)
         return res.reshape(self.n * 7)
+
+class Euclidean_n:
+    def __init__(self, n):
+        self.n = n
+        self.euc = euclidean()
+
+    def project_to_geometry(self, P, use_cpu=False):
+        return P
+
+    def distance(self, P0, P1, mask0=None, mask1=None):
+
+        if mask0 is None:
+            mask0 = jnp.ones(P0.shape[:-1] + (self.n,)) 
+        if mask1 is None:
+            mask1 = jnp.ones(P1.shape[:-1] + (self.n,))
+
+        mask_combined = mask0 * mask1
+
+        P0 = P0.reshape(P0.shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(P1.shape[:-1] + (self.n, 7))
+        
+        dist_comp = jnp.sum((P0 - P1)**2, axis=-1)
+        
+        if mask0 is not None:
+            return jnp.sum(dist_comp * mask_combined, axis=-1)
+            
+        return jnp.sum(dist_comp, axis=-1)
+
+    def distance_matrix(self, P0, P1, mask0=None, mask1=None):
+
+        if mask0 is None:
+            mask0 = jnp.ones(P0.shape[:-1] + (self.n,)) 
+        if mask1 is None:
+            mask1 = jnp.ones(P1.shape[:-1] + (self.n,))
+
+        mask_outer = mask0[:, None, :] * mask1[None, :, :]
+
+        P0 = P0.reshape(P0.shape[:-1] + (self.n, 7))
+        P1 = P1.reshape(P1.shape[:-1] + (self.n, 7))
+        
+        diff = P0[:, None, ...] - P1[None, :, ...]
+        dist_comp = jnp.sum(diff**2, axis=-1)
+        
+        dist_comp = dist_comp * mask_outer
+        
+        return jnp.sum(dist_comp, axis=-1)
+
+    def interpolant(self, P0, P1, t):
+        return (1 - t) * P0 + t * P1
+
+    def velocity(self, P0, P1, t):
+        return P1 - P0
+
+    def tangent_norm(self, v, w, p, mask_p=None):
+        shape = p.shape
+        v = v.reshape(shape[:-1] + (self.n, 7))
+        w = w.reshape(shape[:-1] + (self.n, 7))
+
+        diff = v - w
+        sq_norm = jnp.square(diff)
+        
+        if mask_p is not None:
+            sq_norm = sq_norm * mask_p[..., None]
+            
+        return jnp.mean(sq_norm)
+
+    def exponential_map(self, p, v, delta_t):
+        return p + v * delta_t
+
+    def weighted_mean(self, points, weights, mask=None):
+        N = points.shape[0]
+        points = points.reshape(N, self.n, 7)
+        
+        if mask is not None:
+            mask = mask.reshape(N, self.n, 7)[..., 0]
+            w_comp = weights[:, None] * mask
+            w_sum = jnp.sum(w_comp, axis=0) + 1e-9
+            w_norm = w_comp / w_sum[None, :]
+            
+            mean_val = jnp.sum(points * w_norm[..., None], axis=0)
+            return mean_val.flatten()
+        
+        w_sum = jnp.sum(weights) + 1e-9
+        w_expanded = weights[:, None, None]
+        mean_val = jnp.sum(points * w_expanded, axis=0) / w_sum
+        return mean_val.reshape(self.n * 7)
 
         

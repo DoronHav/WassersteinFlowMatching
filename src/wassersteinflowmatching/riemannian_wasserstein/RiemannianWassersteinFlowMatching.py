@@ -595,7 +595,7 @@ class RiemannianWassersteinFlowMatching:
             
             conditioning = jnp.where(jnp.isnan(conditioning), 0.0, conditioning)
 
-            cond_flow = jnp.squeeze(self.FlowMatchingModel.apply(
+            cond_flow = self.FlowMatchingModel.apply(
                 {"params": params},
                 point_cloud=point_clouds,
                 t=t * jnp.ones(point_clouds.shape[0]),
@@ -603,10 +603,10 @@ class RiemannianWassersteinFlowMatching:
                 conditioning=conditioning,
                 is_null_conditioning=is_null_conditioning,
                 deterministic=True
-            ))
+            )
 
             if(self.cfg):
-                uncond_flow = jnp.squeeze(self.FlowMatchingModel.apply(
+                uncond_flow = self.FlowMatchingModel.apply(
                     {"params": params},
                     point_cloud=point_clouds,
                     t=t * jnp.ones(point_clouds.shape[0]),
@@ -614,7 +614,7 @@ class RiemannianWassersteinFlowMatching:
                     conditioning=conditioning,
                     is_null_conditioning=jnp.ones(point_clouds.shape[0], dtype=bool),
                     deterministic=True
-                ))
+                )
 
 
                 flow = uncond_flow + self.w_cfg * (cond_flow - uncond_flow)
@@ -622,13 +622,13 @@ class RiemannianWassersteinFlowMatching:
                 flow = cond_flow
         else:
 
-            flow = jnp.squeeze(self.FlowMatchingModel.apply(
+            flow = self.FlowMatchingModel.apply(
                 {"params": params},
                 point_cloud=point_clouds,
                 t=t * jnp.ones(point_clouds.shape[0]),
                 masks=weights > 0,
                 deterministic=True
-            ))
+            )
 
         update = self.exponential_map_vmap(point_clouds, flow, -dt)
         return update
