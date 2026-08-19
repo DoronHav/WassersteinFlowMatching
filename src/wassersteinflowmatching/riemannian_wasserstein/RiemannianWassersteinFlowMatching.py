@@ -12,6 +12,7 @@ import pickle # type: ignore
 
 import wassersteinflowmatching.riemannian_wasserstein.utils_OT as utils_OT # type: ignore
 import wassersteinflowmatching.riemannian_wasserstein.utils_Geom as utils_Geom # type: ignore  # noqa: F401
+import wassersteinflowmatching.riemannian_wasserstein.utils_Metric as utils_Metric # type: ignore  # noqa: F401
 import wassersteinflowmatching.riemannian_wasserstein.utils_Noise as utils_Noise # type: ignore
 from wassersteinflowmatching.riemannian_wasserstein._utils_Transformer import AttentionNN # type: ignore
 from wassersteinflowmatching.riemannian_wasserstein.DefaultConfig import DefaultConfig # type: ignore
@@ -29,6 +30,11 @@ class RiemannianWassersteinFlowMatching:
     :return: initialized WassersteinFlowMatching model
     """
 
+    _geom_module = utils_Geom
+
+    def _create_geom_utils(self, geom_name):
+        return getattr(self._geom_module, geom_name)()
+
     def __init__(
         self,
         point_clouds,
@@ -40,12 +46,18 @@ class RiemannianWassersteinFlowMatching:
 
         
     
-        print("Initializing WassersteinFlowMatching")
+        print("Initializing RiemannianWassersteinFlowMatching")
 
         self.config = config
 
         for key, value in kwargs.items():
             setattr(self.config, key, value)
+
+        for key in dir(DefaultConfig):
+            if not key.startswith('__') and not hasattr(self.config, key):
+                val = getattr(DefaultConfig, key)
+                if not callable(val):
+                    setattr(self.config, key, val)
         
         self.geom = self.config.geom
 
@@ -54,9 +66,19 @@ class RiemannianWassersteinFlowMatching:
         self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
 
 
-        self.geom_utils = getattr(utils_Geom, self.geom)()
+        self.geom_utils = self._create_geom_utils(self.geom)
         
         print(f'Using {self.geom} geometry')
+
+        # if geom inherits from generic_riemannian, print the number of n_interpolation_steps
+        
+        _generic_riem = getattr(self._geom_module, 'generic_riemannian', None)
+        if _generic_riem is not None and issubclass(type(self.geom_utils), _generic_riem):
+            # if n_interpolation_steps is not set in config, set it to 1000
+            if not hasattr(self.config, 'n_interpolation_steps'):
+                self.config.n_interpolation_steps = 1000 
+            
+            print(f'Using {self.geom_utils.n_interpolation_steps} interpolation steps for integration')
 
         self.interpolant_vmap = jax.vmap(jax.vmap(self.geom_utils.interpolant, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.interpolant_velocity_vmap = jax.vmap(jax.vmap(self.geom_utils.velocity, in_axes=(0, 0, None), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
@@ -64,10 +86,11 @@ class RiemannianWassersteinFlowMatching:
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
-        print("Projecting point clouds to geometry (with cpu)...")
+        self.cpu_projection = getattr(self.config, 'cpu_projection', True)
+        print(f"Projecting point clouds to geometry (with {'cpu' if self.cpu_projection else 'gpu'})...")
         
 
-        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = True)) for pc in tqdm(point_clouds)]
+        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = self.cpu_projection)) for pc in tqdm(point_clouds)]
 
 
         self.weights = [
@@ -83,16 +106,19 @@ class RiemannianWassersteinFlowMatching:
         self.noise_config = types.SimpleNamespace()
         self.noise_type = self.config.noise_type
         
-        self.noise_geom = self.config.noise_geom
+        self.noise_geom = getattr(self.config, 'noise_geom', 'auto')
+        if self.noise_geom == 'auto':
+            self.noise_geom = self.geom
         if(self.noise_geom != self.geom):
             print(f"Using {self.noise_geom} geometry for noise instead of {self.geom}")
             self.noise_geom = self.config.noise_geom
-            self.noise_proj_to_geometry = getattr(utils_Geom, self.noise_geom)().project_to_geometry 
+            self.noise_proj_to_geometry = self._create_geom_utils(self.noise_geom).project_to_geometry 
         else:
             print(f"Using {self.noise_geom} geometry for noise")
             self.noise_proj_to_geometry = self.project_to_geometry  
         # Get noise functions from the factory
-        self.noise_func, param_estimator = utils_Noise.get_noise_functions(self.noise_type, self.noise_proj_to_geometry
+        self.noise_func, param_estimator = utils_Noise.get_noise_functions(self.noise_type, self.noise_proj_to_geometry,
+                                                                           geom_utils=self.geom_utils
         )
 
         self.matched_noise = False 
@@ -185,7 +211,16 @@ class RiemannianWassersteinFlowMatching:
             # Entropic assignment uses geometry-specific weighted mean
             self.sample_map_jit = jax.vmap(lambda P, pc_y: partial(utils_OT.get_assignments_barycentric, weighted_mean_func=self.geom_utils.weighted_mean)(P, pc_y)[0], (0, 0), 0)
         elif(self.monge_map == 'entropic'):
-            self.sample_map_jit = jax.vmap(lambda P, pc_x, pc_y: utils_OT.get_assignments_entropic(P, pc_x, pc_y, self.geom_utils.velocity, self.geom_utils.exponential_map)[0], (0, 0, 0), 0)
+            # The entropic map only needs the log-map at the source (t=0). Some
+            # geometries (e.g. the mesh) implement velocity() via an expensive
+            # per-substep projection scan; use a scan-free t=0 velocity if one is
+            # provided, otherwise fall back to velocity(., ., 0).
+            if hasattr(self.geom_utils, 'velocity_at_source'):
+                _src_vel = self.geom_utils.velocity_at_source
+                entropic_log_map = lambda p0, p1, t: _src_vel(p0, p1)
+            else:
+                entropic_log_map = self.geom_utils.velocity
+            self.sample_map_jit = jax.vmap(lambda P, pc_x, pc_y: utils_OT.get_assignments_entropic(P, pc_x, pc_y, entropic_log_map, self.geom_utils.exponential_map)[0], (0, 0, 0), 0)
         else:
             # raise error for unknown monge_map
             raise ValueError(f"Unknown monge_map: {self.monge_map}")
@@ -291,6 +326,11 @@ class RiemannianWassersteinFlowMatching:
                 )
                 print(f"Auto-selected {self.mini_batch_ot_num_iter} Sinkhorn iterations for Mini-Batch OT.")
         
+        if(self.config.neural_net_type == 'pointnn'):
+            print("Using PointNN architecture")
+        else:
+            print("Using AttentionNN architecture")
+
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
     
@@ -355,7 +395,7 @@ class RiemannianWassersteinFlowMatching:
             ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
                                         [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
 
-        noise_ind, ot_solve = utils_OT.ot_mat_from_distance(ot_matrix, 0.01, True, num_iteration=self.mini_batch_ot_num_iter)
+        noise_ind, ot_solve = utils_OT.ot_mat_from_distance(ot_matrix, self.config.minibatch_ot_eps, self.config.minibatch_ot_lse, num_iteration=self.mini_batch_ot_num_iter)
         return(noise_ind, ot_solve)
 
     @partial(jit, static_argnums=(0,))
@@ -704,13 +744,19 @@ class RiemannianWassersteinFlowMatching:
 
         dt = 1 / timesteps
 
-        def step_fn(carry, t):
-            current_noise = carry
-            next_noise = self.get_flow(self.params, current_noise, noise_weights, t, dt, generate_conditioning)
-            return next_noise, next_noise
-
+        # NOTE: integrate with a Python loop of per-step jitted `get_flow` calls rather than
+        # `jax.lax.scan`. XLA fuses the scan body with a different float32 reduction order than
+        # the standalone forward pass, and for expansive/ill-conditioned flows that ~1e-4 per-step
+        # difference compounds coherently over the trajectory into a systematic bias (samples drift
+        # off-manifold). The per-step loop keeps generation numerics aligned with the training-time
+        # forward pass. See scripts/merfish_niche_benchmark/verify_loop_fix.py.
         timesteps_array = jnp.linspace(1, dt, timesteps)
-        _, all_noises = jax.lax.scan(step_fn, noise, timesteps_array)
+        current_noise = noise
+        collected = []
+        for t in timesteps_array:
+            current_noise = self.get_flow(self.params, current_noise, noise_weights, t, dt, generate_conditioning)
+            collected.append(current_noise)
+        all_noises = jnp.stack(collected, axis=0)
 
         if generate_conditioning is None:
             return all_noises, noise_weights
@@ -744,7 +790,7 @@ class SourcedRiemannianWassersteinFlowMatching(RiemannianWassersteinFlowMatching
         self.num_sinkhorn_iters = self.config.num_sinkhorn_iters
         self.matched = matched
 
-        self.geom_utils = getattr(utils_Geom, self.geom)()
+        self.geom_utils = self._create_geom_utils(self.geom)
         
         print(f'Using {self.geom} geometry')
 
@@ -754,13 +800,15 @@ class SourcedRiemannianWassersteinFlowMatching(RiemannianWassersteinFlowMatching
         self.loss_func_vmap = jax.vmap(jax.vmap(self.geom_utils.tangent_norm, in_axes=(0, 0, 0), out_axes=0), in_axes=(0, 0, 0), out_axes=0)
         self.project_to_geometry = self.geom_utils.project_to_geometry
 
-        print("Projecting target point clouds to geometry (with cpu)...")
-        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = True)) for pc in tqdm(point_clouds)]
+        self.cpu_projection = getattr(self.config, 'cpu_projection', True)
+        _proj_dev = 'cpu' if self.cpu_projection else 'gpu'
+        print(f"Projecting target point clouds to geometry (with {_proj_dev})...")
+        self.point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = self.cpu_projection)) for pc in tqdm(point_clouds)]
         self.weights = [np.ones(pc.shape[0]) / pc.shape[0] for pc in self.point_clouds]
         self.point_clouds, self.weights = pad_pointclouds(self.point_clouds, self.weights)
 
-        print("Projecting source point clouds to geometry (with cpu)...")
-        self.source_point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = True)) for pc in tqdm(source_point_clouds)]
+        print(f"Projecting source point clouds to geometry (with {_proj_dev})...")
+        self.source_point_clouds = [np.asarray(self.project_to_geometry(pc, use_cpu = self.cpu_projection)) for pc in tqdm(source_point_clouds)]
         self.source_weights = [np.ones(pc.shape[0]) / pc.shape[0] for pc in self.source_point_clouds]
         self.source_point_clouds, self.source_weights = pad_pointclouds(self.source_point_clouds, self.source_weights)
         
@@ -832,7 +880,16 @@ class SourcedRiemannianWassersteinFlowMatching(RiemannianWassersteinFlowMatching
         elif(self.monge_map == 'barycentric'):
              self.sample_map_jit = jax.vmap(lambda P, pc_y: partial(utils_OT.get_assignments_barycentric, weighted_mean_func=self.geom_utils.weighted_mean)(P, pc_y)[0], (0, 0), 0)
         elif(self.monge_map == 'entropic'):
-            self.sample_map_jit = jax.vmap(lambda P, pc_x, pc_y: utils_OT.get_assignments_entropic(P, pc_x, pc_y, self.geom_utils.velocity, self.geom_utils.exponential_map)[0], (0, 0, 0), 0)
+            # The entropic map only needs the log-map at the source (t=0). Some
+            # geometries (e.g. the mesh) implement velocity() via an expensive
+            # per-substep projection scan; use a scan-free t=0 velocity if one is
+            # provided, otherwise fall back to velocity(., ., 0).
+            if hasattr(self.geom_utils, 'velocity_at_source'):
+                _src_vel = self.geom_utils.velocity_at_source
+                entropic_log_map = lambda p0, p1, t: _src_vel(p0, p1)
+            else:
+                entropic_log_map = self.geom_utils.velocity
+            self.sample_map_jit = jax.vmap(lambda P, pc_x, pc_y: utils_OT.get_assignments_entropic(P, pc_x, pc_y, entropic_log_map, self.geom_utils.exponential_map)[0], (0, 0, 0), 0)
         else:
             raise ValueError(f"Unknown monge_map: {self.monge_map}")
 
@@ -1021,13 +1078,19 @@ class SourcedRiemannianWassersteinFlowMatching(RiemannianWassersteinFlowMatching
 
         dt = 1 / timesteps
 
-        def step_fn(carry, t):
-            current_noise = carry
-            next_noise = self.get_flow(self.params, current_noise, noise_weights, t, dt, generate_conditioning)
-            return next_noise, next_noise
-
+        # NOTE: integrate with a Python loop of per-step jitted `get_flow` calls rather than
+        # `jax.lax.scan`. XLA fuses the scan body with a different float32 reduction order than
+        # the standalone forward pass, and for expansive/ill-conditioned flows that ~1e-4 per-step
+        # difference compounds coherently over the trajectory into a systematic bias (samples drift
+        # off-manifold). The per-step loop keeps generation numerics aligned with the training-time
+        # forward pass. See scripts/merfish_niche_benchmark/verify_loop_fix.py.
         timesteps_array = jnp.linspace(1, dt, timesteps)
-        _, all_noises = jax.lax.scan(step_fn, noise, timesteps_array)
+        current_noise = noise
+        collected = []
+        for t in timesteps_array:
+            current_noise = self.get_flow(self.params, current_noise, noise_weights, t, dt, generate_conditioning)
+            collected.append(current_noise)
+        all_noises = jnp.stack(collected, axis=0)
 
         if generate_conditioning is None:
             return all_noises, noise_weights

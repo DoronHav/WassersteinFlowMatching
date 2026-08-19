@@ -1,3 +1,5 @@
+from typing import Optional
+
 from flax import struct # type: ignore
 
 
@@ -28,17 +30,18 @@ class DefaultConfig:
     :param bias_init: ((Callable) initializer of bias weights (default nn.initializers.zeros_init())
     """ 
     geom: str = 'sphere'
-    monge_map: str = 'rounded_matching'
+    monge_map: str = 'entropic'
     wasserstein_eps: float = 0.002
     wasserstein_lse: bool = True
-    num_sinkhorn_iters: int = 200
+    num_sinkhorn_iters: Optional[int] = 200
     mini_batch_ot_mode: bool = True
-    mini_batch_ot_solver: str = 'frechet'
+    mini_batch_ot_solver: str = 'chamfer'
     minibatch_ot_eps: float = 0.01
     minibatch_ot_lse: bool = True
+    neural_net_type: str = 'attention'
     noise_type: str = 'ambient_gaussian'
-    scaling: str = 'None'
-    factor: float = 1.0
+    noise_geom: str = 'auto'
+    mini_batch_ot_num_iter: Optional[int] = -1
     embedding_dim: int = 512
     num_layers: int = 6
     num_heads: int = 4
@@ -48,3 +51,4 @@ class DefaultConfig:
     p_cfg_null: float = 0.1
     w_cfg: float = 2.0
     normalized_condition: bool = False
+    cpu_projection: bool = True

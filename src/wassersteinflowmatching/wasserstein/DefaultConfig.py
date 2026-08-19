@@ -7,15 +7,13 @@ class WassersteinFlowMatchingConfig:
     monge_map: str = 'rounded_matching'
     wasserstein_eps: float = 0.002
     wasserstein_lse: bool = True
-    num_sinkhorn_iters: int = 200
+    num_sinkhorn_iters: Optional[int] = 200
     mini_batch_ot_mode: bool = True
     mini_batch_ot_solver: str = 'chamfer'
     minibatch_ot_eps: float = 0.01
     minibatch_ot_lse: bool = True
     noise_type: str = 'chol_normal'
     noise_df_scale: float = 2.0
-    scaling: str = 'None'
-    scaling_factor: float = 1.0
     guidance_gamma: float = 1.5
     discrete_labels: Optional[bool] = None
     label_dim: Optional[int] = None  # Set to None if labels are not used

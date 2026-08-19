@@ -112,6 +112,58 @@ def estimate_euclidean_diagonal_gaussian_params(point_clouds, weights=None):
         'noise_df_scale': 1.0,
     }
 
+def estimate_chol_normal_params(point_clouds, weights=None):
+    """Same estimator as :func:`estimate_euclidean_gaussian_params`, but with ``noise_df_scale``
+    set to 2.0 (the original ``wassersteinflowmatching.wasserstein`` module's default) instead of
+    the hardcoded 1.0 -- see :func:`chol_normal_noise`.
+    """
+    params = estimate_euclidean_gaussian_params(point_clouds, weights)
+    params['noise_df_scale'] = 2.0
+    return params
+
+
+def chol_normal_noise(size, noise_config, key, projection_func):
+    """Direct port of ``wassersteinflowmatching.wasserstein.utils_Noise.chol_normal``, for
+    pinpointing why that module's noise reproduces the WFM paper's reported MERFISH 1-NNA
+    (~53-56%) while ``ambient_gaussian`` (this module's default) does not (~90%+ on the same
+    data/model/OT config).
+
+    Structurally identical to :func:`euclidean_gaussian_noise` (same per-cloud Cholesky-factor
+    perturbation of a mean/std fit across training clouds), but with two differences:
+
+    1. Zero-mean: no ``+ noise_config.mean`` added back (for PCA-centered features this is close
+       to a no-op).
+    2. ``noise_df_scale`` multiplies the *sampled points* directly (widening each cloud's actual
+       spread by 2x linear / 4x variance, the default here), not ``cov_chol_std`` (which only
+       widens the *diversity of covariance shapes across clouds*, not any single cloud's spread --
+       and is hardcoded to 1.0 in :func:`estimate_euclidean_gaussian_params`, i.e. a no-op there).
+    """
+    K, n, d = size
+    chol_key, gaussian_key = random.split(key)
+
+    chol_mean = noise_config.cov_chol_mean
+    chol_std = noise_config.cov_chol_std
+
+    lower_mask = jnp.tril(jnp.ones((d, d)))
+    perturbations = random.normal(chol_key, (K, d, d)) * chol_std * lower_mask
+    cov_matrices_chol = chol_mean + perturbations
+
+    diag_indices = jnp.diag_indices(d)
+    diag_values = jnp.abs(jnp.diagonal(cov_matrices_chol, axis1=1, axis2=2)) + 1e-6
+    cov_matrices_chol = cov_matrices_chol.at[:, diag_indices[0], diag_indices[1]].set(diag_values)
+
+    def sample_gaussian_points_chol(key, cov_matrix_chol, n_samples):
+        points = random.normal(key, (n_samples, d))
+        return points @ cov_matrix_chol.T
+
+    keys = random.split(gaussian_key, K)
+    points = jax.vmap(lambda k, cov: sample_gaussian_points_chol(k, cov, n))(keys, cov_matrices_chol)
+    points = points * noise_config.noise_df_scale
+
+    projected_points = projection_func(points)
+    return projected_points
+
+
 def euclidean_diagonal_gaussian_noise(size, noise_config, key, projection_func):
     """Sample from a Diagonal Gaussian distribution and project to a specified geometry."""
     K, n, d = size
@@ -184,11 +236,21 @@ def degenerate_euclidean_noise(size, noise_config, key, projection_func):
 # ##################################################################################################
 
 
-def get_noise_functions(noise_type, projection_func=None):
+def get_noise_functions(noise_type, projection_func=None, geom_utils=None):
     """
     Factory function to get noise generation and parameter estimation functions.
+
+    :param geom_utils: (optional) geometry object; required for geometry-native noise types
+        such as 'uniform_mesh', which sample the base distribution directly on the manifold.
     """
-    
+
+    # Geometry-native base distribution: uniform over the mesh surface (no data-driven params).
+    if noise_type == 'uniform_mesh':
+        if geom_utils is None or not hasattr(geom_utils, 'sample_uniform'):
+            raise ValueError("noise type 'uniform_mesh' requires a geometry with sample_uniform (e.g. TriangleMesh)")
+        noise_func = lambda size, noise_config, key: geom_utils.sample_uniform(size, key)
+        return noise_func, None
+
     # For uniform noise, there's no parameter estimation from data
     if noise_type == 'ambient_gaussian':
         if projection_func is None:
@@ -196,6 +258,12 @@ def get_noise_functions(noise_type, projection_func=None):
         raw_noise_func = euclidean_gaussian_noise
         noise_func = lambda size, noise_config, key: raw_noise_func(size, noise_config, key, projection_func=projection_func)
         param_estimator = estimate_euclidean_gaussian_params
+    elif noise_type == 'chol_normal':
+        if projection_func is None:
+            raise ValueError("projection_func must be provided for chol_normal")
+        raw_noise_func = chol_normal_noise
+        noise_func = lambda size, noise_config, key: raw_noise_func(size, noise_config, key, projection_func=projection_func)
+        param_estimator = estimate_chol_normal_params
     elif noise_type == 'ambient_diagonal_gaussian':
         if projection_func is None:
             raise ValueError("projection_func must be provided for ambient_diagonal_gaussian on sphere/hyperbolic")

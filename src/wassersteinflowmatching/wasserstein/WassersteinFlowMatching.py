@@ -17,7 +17,6 @@ from wassersteinflowmatching.wasserstein._utils_Transformer import AttentionNN #
 from wassersteinflowmatching.wasserstein.DefaultConfig import WassersteinFlowMatchingConfig # type: ignore
 from wassersteinflowmatching.wasserstein._utils_Processing import pad_pointclouds # type: ignore
 
-# import wandb
 
 
 class WassersteinFlowMatching:
@@ -39,7 +38,7 @@ class WassersteinFlowMatching:
         matched_noise = False,
         config = WassersteinFlowMatchingConfig,
         key = random.key(0),
-        use_wandb = True,
+
         **kwargs,
     ):
 
@@ -60,10 +59,7 @@ class WassersteinFlowMatching:
 
         self.config = config
 
-        self.scaling = self.config.scaling
-        self.scaling_factor = self.config.scaling_factor
-
-        self.point_clouds = self.scale_func(point_clouds)
+        self.point_clouds = point_clouds
 
 
         self.weights = [
@@ -78,7 +74,7 @@ class WassersteinFlowMatching:
 
         self.noise_config = types.SimpleNamespace()
         if(noise_point_clouds is not None):
-            self.noise_point_clouds = self.scale_func(noise_point_clouds)
+            self.noise_point_clouds = noise_point_clouds
             self.noise_weights = [
                 np.ones(pc.shape[0]) / pc.shape[0] for pc in self.noise_point_clouds
             ]
@@ -120,19 +116,21 @@ class WassersteinFlowMatching:
             print("Automatically setting num_sinkhorn_iter by testing OT function")
 
             subkey_noise, key = random.split(key)
-            noise_point_clouds = self.noise_func(size = [256, min(self.point_clouds[0].shape[0], 2048), self.space_dim], 
+            noise_point_clouds = self.noise_func(size = [256, min(self.point_clouds[0].shape[0], 2048), self.space_dim],
                                        noise_config = self.noise_config,
                                        key = subkey_noise)
             noise_weights = jnp.ones([noise_point_clouds.shape[0], noise_point_clouds.shape[1]]) / noise_point_clouds.shape[1]
 
-            self.num_sinkhorn_iters = utils_OT.auto_find_num_iter(point_clouds = self.point_clouds, 
+            self.num_sinkhorn_iters = utils_OT.auto_find_num_iter(point_clouds = self.point_clouds,
                                                                  weights = self.weights,
                                                                  noise_point_clouds = noise_point_clouds,
                                                                 noise_weights = noise_weights,
                                                                  eps = self.config.wasserstein_eps, lse_mode = self.config.wasserstein_lse)
             print("Setting num_sinkhorn_iter to", self.num_sinkhorn_iters)
+        elif self.num_sinkhorn_iters is None:
+            print("Using num_sinkhorn_iter = None (running until convergence; iterations will be logged during training)")
         else:
-            print("Using num_sinkhorn_iter =", self.num_sinkhorn_iters) 
+            print("Using num_sinkhorn_iter =", self.num_sinkhorn_iters)
 
         if(self.monge_map == 'entropic'):
             print(f"Using entropic map with {self.num_sinkhorn_iters} iterations and {self.config.wasserstein_eps} epsilon")
@@ -233,31 +231,7 @@ class WassersteinFlowMatching:
         
         self.FlowMatchingModel = AttentionNN(config = self.config)
 
-        self.use_wandb = use_wandb
-        if self.use_wandb:
-            # Initialize wandb if not already initialized
-            if not wandb.run:
-                wandb.init(
-                    project="pascientflow",
-                    name="WFM_jax_pc"
-                )
 
-    def scale_func(self, point_clouds):
-        """
-        :meta private:
-        """
-
-        if self.scaling == "min_max_total":
-            if(hasattr(self, 'max_val_scale')):
-                return [self.scaling_factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
-            else:
-                self.max_val_scale = np.max([np.max(pc) for pc in point_clouds])
-                self.min_val_scale = np.min([np.min(pc) for pc in point_clouds])
-                return [self.scaling_factor * (2 * ((pc - self.min_val_scale) / (self.max_val_scale - self.min_val_scale)) - 1) for pc in point_clouds]
-        if self.scaling == "min_max_each":
-            point_clouds = [self.scaling_factor * (2 * (pc - pc.min(keepdims=True)) / (pc.max(keepdims=True) - pc.min(keepdims=True)) - 1) for pc in point_clouds]
-        return point_clouds
-    
 
     def create_train_state(self, model, learning_rate, decay_steps, key = random.key(0)):
         """
@@ -320,7 +294,7 @@ class WassersteinFlowMatching:
             ot_matrix = self.ot_mat_jit([point_clouds[matrix_ind[:, 0]], point_cloud_weights[matrix_ind[:, 0]]],
                                         [noise[matrix_ind[:, 1]], noise_weights[matrix_ind[:, 1]]]).reshape(point_clouds.shape[0], noise.shape[0])
 
-        noise_ind = utils_OT.ot_mat_from_distance(ot_matrix, 0.002, True)
+        noise_ind = utils_OT.ot_mat_from_distance(ot_matrix, 0.002, True, self.num_sinkhorn_iters)
         return(noise_ind)
 
 
@@ -357,8 +331,15 @@ class WassersteinFlowMatching:
         interpolates_time = random.uniform(subkey_t, (point_clouds_batch.shape[0],), minval=0.0, maxval=1.0)
 
         # Time transport_plan_jit operation
-        optimal_flow = self.transport_plan_jit([noise_samples, noise_weights], 
-                                            [point_clouds_batch, weights_batch])[0]
+        ot_result = self.transport_plan_jit([noise_samples, noise_weights],
+                                            [point_clouds_batch, weights_batch])
+        optimal_flow = ot_result[0]
+        if self.num_sinkhorn_iters is None:
+            ot_solve = ot_result[1]
+            batch_iters = jnp.max(
+                jnp.sum(ot_solve.errors > -1, axis=-1) * jnp.mean(ot_solve.inner_iterations))
+        else:
+            batch_iters = jnp.array(float(self.num_sinkhorn_iters))
 
         if self.monge_map == 'sample':
             # Time sample_map_jit operation
@@ -401,7 +382,7 @@ class WassersteinFlowMatching:
         loss, grads = jax.value_and_grad(loss_fn)(state.params)
         state = state.apply_gradients(grads=grads)
 
-        return state, loss
+        return state, loss, batch_iters
 
 
 
@@ -424,7 +405,6 @@ class WassersteinFlowMatching:
         source_sample = None,
         saved_state = None,
         key=random.key(0),
-        log_every=20,  # Add this parameter
     ):
         """
         Set up optimization parameters and train the ENVI moodel
@@ -495,22 +475,16 @@ class WassersteinFlowMatching:
 
             subkey, key = random.split(key, 2)
 
-            self.state, loss = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, noise_samples, noise_weights, key = subkey)
+            self.state, loss, batch_iters = self.train_step(self.state, point_clouds_batch, weights_batch, labels_batch, noise_samples, noise_weights, key = subkey)
 
             self.params = self.state.params
-            self.losses.append(loss) 
-
-            # Log to wandb every log_every steps
-            if self.use_wandb and (training_step+1) % log_every == 0:
-                wandb.log({
-                    "train_loss": float(loss),
-                    #"step": current_step,
-                    "trainer/global_step": training_step,
-                    "learning_rate": float(self.state.opt_state[1].hyperparams['learning_rate']) if hasattr(self.state.opt_state[1], 'hyperparams') else learning_rate
-                })
+            self.losses.append(loss)
 
             if(training_step % verbose == 0):
-                tq.set_description(": {:.3e}".format(loss))
+                desc = ": {:.3e}".format(loss)
+                if self.num_sinkhorn_iters is None:
+                    desc += " | OT iters: {:.0f}".format(float(batch_iters))
+                tq.set_description(desc)
 
     def load_train_model(self, path):
         """

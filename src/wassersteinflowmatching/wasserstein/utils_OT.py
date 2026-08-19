@@ -247,12 +247,12 @@ def chamfer_distance(pc_x, pc_y):
     chamfer_dist = jnp.sum(pairwise_dist.min(axis = 0) * w_y) + jnp.sum(pairwise_dist.min(axis = 1) * w_x)
     return chamfer_dist
 
-def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True): 
+def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True, num_iteration = 200):
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
         lse_mode = lse_mode,
-        min_iterations = 200,
-        max_iterations = 200)
+        **iter_kwargs)
     map_ind = rounded_matching(ot_solve.matrix)
     return(map_ind)
 
@@ -274,67 +274,63 @@ def sample_ot_matrix(pc_x, pc_y, mat, key):
 
     return sampled_flow
 
-def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_entropic(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200):
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
-
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
-    
+        lse_mode = lse_mode,
+        **iter_kwargs)
+
     potentials = ot_solve.to_dual_potentials()
     delta = potentials.transport(pc_x)-pc_x
     return(delta, ot_solve)
 
-def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_argmax(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200):
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
-
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
-    
+        lse_mode = lse_mode,
+        **iter_kwargs)
+
     map_ind = jnp.argmax(ot_solve.matrix, axis = 1)
     delta = pc_y[map_ind]-pc_x
     return(delta, ot_solve)
 
-def transport_plan_rounded(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_rounded(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200):
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
-
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
-    
+        lse_mode = lse_mode,
+        **iter_kwargs)
+
     map_ind = rounded_matching(ot_solve.matrix)
     delta = pc_y[map_ind]-pc_x
     return(delta, ot_solve)
 
 
-def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200): 
+def transport_plan_sample(pc_x, pc_y, eps = 0.01, lse_mode = False, num_iteration = 200):
     pc_x, w_x = pc_x[0], pc_x[1]
     pc_y, w_y = pc_y[0], pc_y[1]
-
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
-    
+        lse_mode = lse_mode,
+        **iter_kwargs)
+
     return(ot_solve.matrix, ot_solve)
 
 def transport_plan_unreg(pc_x, pc_y): 

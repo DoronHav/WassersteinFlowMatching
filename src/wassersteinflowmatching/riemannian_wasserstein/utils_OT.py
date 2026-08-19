@@ -530,13 +530,13 @@ def transport_plan(pc_x, pc_y, distance_matrix_func, eps = 0.01, lse_mode = Fals
     else:
         distmat = distance_matrix_func(pc_x, pc_y)
     
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.geometry.Geometry(cost_matrix = distmat, epsilon = eps, scale_cost = 'max_cost'),
         a = w_x,
         b = w_y,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration,
-        lse_mode = lse_mode)
+        lse_mode = lse_mode,
+        **iter_kwargs)
     
     ot_matrix = ot_solve.matrix
     return(ot_matrix, ot_solve)
@@ -578,11 +578,9 @@ def transport_plan_matched(pc_x, pc_y):
 
 
 def ot_mat_from_distance(distance_matrix, eps = 0.002, lse_mode = True, num_iteration = 200): 
-    ot_solve = linear.solve(
-        ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost'),
-        lse_mode = lse_mode,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration)
+    geom = ott.geometry.geometry.Geometry(cost_matrix = distance_matrix, epsilon = eps, scale_cost = 'max_cost')
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
+    ot_solve = linear.solve(geom, lse_mode = lse_mode, **iter_kwargs)
     _, map_ind = get_assignments_rounding(ot_solve.matrix, pc_y=None)
     return(map_ind, ot_solve)
 
@@ -678,13 +676,13 @@ def entropic_ot_distance(pc_x, pc_y, eps = 0.1, lse_mode = False, num_iteration 
     else:
         pc_y, w_y = pc_y[0], pc_y[1]
 
+    iter_kwargs = {'min_iterations': num_iteration, 'max_iterations': num_iteration} if num_iteration is not None else {}
     ot_solve = linear.solve(
         ott.geometry.pointcloud.PointCloud(pc_x, pc_y, cost_fn=None, epsilon = eps),
         a = w_x,
         b = w_y,
         lse_mode = lse_mode,
-        min_iterations = num_iteration,
-        max_iterations = num_iteration)
+        **iter_kwargs)
     return(ot_solve.reg_ot_cost)
 
 

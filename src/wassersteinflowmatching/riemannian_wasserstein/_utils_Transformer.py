@@ -72,7 +72,7 @@ class FeedForward(nn.Module):
         return output
 
 
-class EncoderBlock(nn.Module):
+class AttentionEncoderBlock(nn.Module):
     """
     Transformer encoder layer (optionally conditioned) using 
     Pre-Normalization for improved stability in deep networks.
@@ -124,6 +124,69 @@ class EncoderBlock(nn.Module):
         #normed_x = SetLayerNorm()(x, mask=masks)
         normed_x = nn.LayerNorm()(x)
         ff_output = FeedForward(config=self.config)(normed_x, deterministic=deterministic, dropout_rng=ff_rng)
+        output = x + ff_output
+        
+        return output
+
+class PointEncoderBlock(nn.Module):
+    """
+    Point encoder layer (fully-connected substitute for Attention) using
+    Pre-Normalization.
+    """
+
+    config: dict
+
+    @nn.compact
+    def __call__(
+        self, 
+        inputs: jnp.ndarray, 
+        masks: Optional[jnp.ndarray] = None, 
+        dropout_rng: Optional[jnp.ndarray] = None, 
+        t_emb: Optional[jnp.ndarray] = None, 
+        c_emb: Optional[jnp.ndarray] = None,
+        deterministic: bool = True
+    ) -> jnp.ndarray:
+        
+        # In PointNN, we replace the Multi-Head Attention block with a
+        # FeedForward block (or simply a dense block), making it a purely
+        # point-wise architecture (a ResNet over the point features).
+        # To match the structure of EncoderBlock (which has 2 sub-layers),
+        # we will use a FeedForward block in place of Attention.
+        
+        # --- 1. Conditioning ---
+        conditioning = jnp.zeros_like(inputs)
+        if t_emb is not None:
+            conditioning += t_emb[:, None, :]
+        if c_emb is not None:
+            conditioning += c_emb[:, None, :]
+    
+        conditioned_inputs = inputs + conditioning
+        
+        # We process masks if needed, but for FC layers masked points 
+        # just get processed and can be ignored later.
+
+        dropout_rng_1, dropout_rng_2 = jax.random.split(dropout_rng) if dropout_rng is not None else (None, None)
+        
+        # --- Sub-layer 1: Replacement for Attention ---
+        normed_inputs = nn.LayerNorm()(conditioned_inputs)
+        
+        # Using FeedForward as the "mixing" block (channel mixing instead of spatial mixing)
+        # to maintain non-linearity and capacity similar to a block.
+        block1_output = FeedForward(config=self.config)(
+            normed_inputs, 
+            deterministic=deterministic, 
+            dropout_rng=dropout_rng_1
+        )
+        
+        x = inputs + block1_output
+        
+        # --- Sub-layer 2: FeedForward ---
+        normed_x = nn.LayerNorm()(x)
+        ff_output = FeedForward(config=self.config)(
+            normed_x, 
+            deterministic=deterministic, 
+            dropout_rng=dropout_rng_2
+        )
         output = x + ff_output
         
         return output
@@ -202,6 +265,10 @@ class AttentionNN(nn.Module):
                 # Then pass through the dense layer
                 c_emb = nn.Dense(features=embedding_dim)(conditioning)
 
+        if config.neural_net_type == 'attention':
+            EncoderBlock = AttentionEncoderBlock
+        elif config.neural_net_type == 'pointnn':
+            EncoderBlock = PointEncoderBlock
         # 3. Apply Transformer blocks (no changes here)
         x = x_emb
         for _ in range(num_layers):
@@ -212,6 +279,7 @@ class AttentionNN(nn.Module):
             )(x, deterministic=deterministic, masks=masks, dropout_rng=dropout_rng, t_emb=t_emb, c_emb=c_emb)
 
         # 4. Final output layer (no changes here)
+        x = nn.LayerNorm()(x)
         x = nn.Dense(
             features=space_dim,
             kernel_init=nn.initializers.variance_scaling(
@@ -221,3 +289,4 @@ class AttentionNN(nn.Module):
         )(x)
         #x = nn.Dense(features=space_dim)(x)
         return x
+

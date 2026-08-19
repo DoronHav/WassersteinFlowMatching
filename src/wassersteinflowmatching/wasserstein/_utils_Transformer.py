@@ -127,16 +127,17 @@ class AttentionNN(nn.Module):
         for _ in range(num_layers):
             dropout_rng, layer_dropout_rng = random.split(dropout_rng)
             x = EncoderBlock(config)(
-                inputs=x, 
-                t_emb=t_emb, 
-                l_emb=l_emb, 
-                masks=masks, 
+                inputs=x,
+                t_emb=t_emb,
+                c_emb=l_emb,
+                masks=masks,
                 deterministic=deterministic, 
                 dropout_rng=layer_dropout_rng
             )   
         
         # --- 4. Final Output Layer ---
-        x = nn.Dense(features=space_dim, 
+        x = nn.LayerNorm()(x)
+        x = nn.Dense(features=space_dim,
                     kernel_init=nn.initializers.variance_scaling(1e-5, mode='fan_in', distribution='truncated_normal'), 
                     bias_init=nn.initializers.zeros)(x)
         return x
